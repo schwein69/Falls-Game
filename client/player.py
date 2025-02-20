@@ -11,7 +11,7 @@ class Player(FirstPersonController):
             jump_height=2.5,
             jump_duration=0.4,
             origin_y=-0.5,
-            collider="cube",
+            collider="box",
             speed=6
         )
         # Generate a random RGB color
@@ -62,10 +62,10 @@ class Player(FirstPersonController):
         # If jumping and left mouse is clicked, boost in camera direction
         if ursina.mouse.left and self.can_dash and is_jumping :
             direction = ursina.Vec3(self.forward.x, 0, self.forward.z).normalized()  # Get forward direction
-            dash_distance = 8  # Adjust how far the dash moves
-            dash_duration = 0.5  # Time it takes to complete the dash
+            dash_distance = 5  # Adjust how far the dash moves
+            dash_duration = 0.3  # Time it takes to complete the dash
             # Animate player's position smoothly
-            self.animate_position(self.position + direction * dash_distance, duration=dash_duration, curve=ursina.curve.out_expo)
+            self.animate_position(self.position + direction * dash_distance, duration=dash_duration, curve=ursina.curve.linear)
             self.can_dash = False  # Disable dashing until grounded again
         else:
             super().update()
