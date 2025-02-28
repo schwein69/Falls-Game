@@ -9,7 +9,7 @@ CUBE_SCALE = 1.5
 BLOCK_TYPES = ['normal', 'speed', 'superjump']
 
 # Block probabilities
-BLOCK_PROBABILITIES = [0.9, 0.05, 0.05]
+BLOCK_PROBABILITIES = [0.95, 0.025, 0.025]
 
 def get_random_block_type():
     return random.choices(BLOCK_TYPES, weights=BLOCK_PROBABILITIES, k=1)[0]
@@ -28,21 +28,28 @@ class FloorCube(ursina.Entity):
         self.has_activated = False  # Flag to track whether the effect was activated
         
     def disappear(self):
-        destroy(self, delay=0.5)
+        # self.animate('y', self.y - 0.5, duration=0.5, curve=curve.linear)
+        # destroy(self, delay=1)
+           # Fade out the block smoothly
+        self.animate('color', color.clear, duration=1)
+        # Disable collider to prevent interaction
+        invoke(setattr, self, 'collider', None, delay=1)
+        # Remove block completely after some time
+        destroy(self, delay=1.5)
     
     def on_step(self, player):
         if self.block_type == 'speed':
             if self.has_activated == False:
-                player.speed += 2
-                self.has_activated = True  # Mark as activated
-                invoke(setattr, player, 'speed', player.speed - 2, delay=2)
+                self.has_activated = True
+                if player.speed == 5:
+                    player.speed += 2
+                    invoke(setattr, player, 'speed', player.speed - 2, delay=2)
         elif self.block_type == 'superjump':
              if self.has_activated == False:
+                self.has_activated = True
                 self.super_jump(player)
-                self.has_activated = True  # Mark as activated
-        else:
-            self.disappear()
-        
+        self.disappear()
+    
     def super_jump(self, player):
         # Get the forward direction (without the y component)
         direction = ursina.Vec3(player.forward.x, 0, player.forward.z).normalized()  # Get forward direction

@@ -4,7 +4,7 @@ import os
 from ursina.prefabs.first_person_controller import FirstPersonController
 
 class Player(FirstPersonController):
-    def __init__(self, position: ursina.Vec3):
+    def __init__(self, position: ursina.Vec3, username: str):
         super().__init__(
             position=position,
             model='sphere',#os.path.join("assets", "fallguys.obj"),
@@ -12,7 +12,7 @@ class Player(FirstPersonController):
             jump_duration=0.4,
             origin_y=-0.5,
             collider="box",
-            speed=6
+            speed=5
         )
         # Generate a random RGB color
         random_color = ursina.color.rgb(random.random(), random.random(), random.random())
@@ -45,6 +45,17 @@ class Player(FirstPersonController):
             scale=self.healthbar_size
         )
 
+
+        self.nameplate = Text(
+            text=username,
+            parent=self,
+            position=self.position,  # Position above the player
+            scale=5,
+            color=random_color,
+            origin=(0, 0),
+            billboard=True  # Ensure text always faces the camera
+        )
+
         self.health = 100
         self.death_message_shown = False
         self.is_jumping = False  # Track if player is jumping
@@ -52,6 +63,8 @@ class Player(FirstPersonController):
 
 
     def update(self):
+        
+        self.nameplate.world_position = self.world_position + Vec3(0, 1.5, 0)
         
          # If the player is on the ground, reset dash ability
         if self.grounded:

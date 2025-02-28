@@ -27,7 +27,7 @@ sky = ursina.Entity(
     double_sided=True
 )
 
-player = Player(ursina.Vec3(0, 30, 0))
+player = Player(ursina.Vec3(0, 30, 0), "Luca")
 player.shade = lit_with_shadows_shader  
 
 camera.z = -5
