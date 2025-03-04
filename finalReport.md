@@ -1,8 +1,7 @@
-# Project title
+# Falls Game
 
-- [Author 1](mailto:author1@studio.unibo.it)
-- [Author 2](mailto:author2@studio.unibo.it)
-- [Author 3](mailto:author3@studio.unibo.it)
+- [Jiahao Guo](mailto:jiahao.guo@studio.unibo.it)
+
 
 ### AI Disclaimer (if needed)
 
@@ -16,23 +15,59 @@ final report/artifact."
 
 ## Abstract
 
-Brief description of the project, its goals, and its achievements.
+### **Project Description, Goals, and Achievements**  
+
+**Falls Game** is a multiplayer game inspired by one of the levels in *Fall Guys*. It features a multi-layered arena where players compete to be the last one standing as platforms disappear beneath them. Players can jump, dash, and interact with special blocks that grant temporary movement abilities, making the gameplay more dynamic and strategic.  
+
+#### **Goals:**  
+- Develop an engaging multiplayer experience with both online and local play.  
+- Implement smooth and responsive movement mechanics, including jumping and dashing.  
+- Design a robust networking system using WebSockets, TCP/UDP, and P2P connections.  
+- Ensure synchronization between players for a fair and competitive experience.  
+
+#### **Achievements:**  
+- Successfully built the game using Python and the Ursina framework for rendering.  
+- Implemented online multiplayer with a client-server model and matchmaking server.  
+- Developed a local multiplayer mode with P2P connectivity for seamless LAN play.  
+- Created a variety of interactive platform mechanics to enhance strategic gameplay.  
+
+The project combines technical innovation with fun, competitive gameplay, making *Falls Game* an exciting multiplayer experience.
 
 ## Concept
 
-Here you should explain:
-- The type of product developed with that project, for example (non-exhaustive):
-    - Application (with GUI, be it mobile, web, or desktop)
-    - Command-line application (CLI could be used by humans or scripts)
-    - Library
-    - Web-service(s)
+#### Type of Product
+Falls Game is a multiplayer desktop application developed using the Python Ursina framework for game development and rendering. It offers both online and local multiplayer modes, allowing players to compete in real-time as they navigate disappearing platforms in a dynamic arena.
 
-- Use case collection
-    - _where_ are the users?
-    - _when_ and _how frequently_ do they interact with the system?
-    - _how_ do they _interact_ with the system? which _devices_ are they using?
-    - does the system need to _store_ user's __data__? _which_? _where_?
-    - most likely, there will be _multiple_ __roles__
+#### User Interaction Context
+##### Where are the users?
+Players can be located anywhere with an internet connection for online matchmaking. For local multiplayer, players must be on the same network.
+
+##### When and how frequently do they interact with the system?
+Users interact with the game whenever they launch it, typically for casual gameplay sessions.
+
+##### How do users interact with the system?
+Players use a keyboard and mouse/game controller to move, jump, and dash within the game.
+A GUI-based menu allows them to select online matchmaking and local play.
+
+##### Which devices are they using?
+The game is designed primarily for PC.
+
+#### Data Storage & Management
+##### Does the system store user data?
+No persistent data storage is used at this stage.
+Redis is used as a temporary caching solution to store player session data.
+If a player disconnects, Redis retains their session data for a short time, allowing them to reconnect without losing progress.
+Once a match ends, all session data is cleared from Redis.
+
+#### User Roles
+##### Players:
+The main users who join matches and compete in the game.
+
+##### Matchmaking & Logic Server:
+Handles player connections, manages temporary session data in Redis, and synchronizes game states.
+
+##### Local Host:
+In local multiplayer, players are connected via p2p.
 
 ## Requirements
 
