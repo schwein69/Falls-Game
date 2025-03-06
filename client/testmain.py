@@ -7,27 +7,30 @@ from player import Player
 from floor import *
 from light import *
 from ursina.shaders import lit_with_shadows_shader 
-
+from usefulFunctions import get_random_position
+import cProfile
 def to_first_person():
     camera.position = (0, 0, 0)
 
 def to_third_person():
     camera.position = (0, 0, -5)
 
-app = ursina.Ursina()
-ursina.window.borderless = False
-ursina.window.title = "Fall guys ursina"
-ursina.window.exit_button.visible = False
+app = Ursina()
+window.borderless = False
+window.title = "Fall guys ursina"
+window.exit_button.visible = False
+window.entity_counter.visible = False
+window.collider_counter.visible = False
 
 floor = Floor()
-sky = ursina.Entity(
+sky = Entity(
     model="sphere",
     texture=os.path.join("assets", "sky.png"),
     scale=9999,
     double_sided=True
 )
 
-player = Player(ursina.Vec3(0, 30, 0), "Luca")
+player = Player(get_random_position(),"Luca")
 player.shade = lit_with_shadows_shader  
 
 camera.z = -5
