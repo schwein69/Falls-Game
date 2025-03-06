@@ -19,7 +19,7 @@ class FloorCube(ursina.Entity):
         super().__init__(
             position=position,
             scale=CUBE_SCALE,
-            model="cube",
+            model="plane",
             collider="box",
             texture = "white_cube"
         )
@@ -28,34 +28,31 @@ class FloorCube(ursina.Entity):
         self.has_activated = False  # Flag to track whether the effect was activated
         
     def disappear(self):
-        # self.animate('y', self.y - 0.5, duration=0.5, curve=curve.linear)
-        # destroy(self, delay=1)
-           # Fade out the block smoothly
         self.animate('color', color.clear, duration=1)
-        # Disable collider to prevent interaction
         invoke(setattr, self, 'collider', None, delay=1)
-        # Remove block completely after some time
         destroy(self, delay=1.5)
     
     def on_step(self, player):
-        if self.block_type == 'speed':
-            if self.has_activated == False:
-                self.has_activated = True
-                if player.speed == 5:
-                    player.speed += 2
-                    invoke(setattr, player, 'speed', player.speed - 2, delay=2)
-        elif self.block_type == 'superjump':
-             if self.has_activated == False:
-                self.has_activated = True
-                self.super_jump(player)
-        self.disappear()
+        # if not self.has_activated:
+        #         if self.block_type == 'speed':
+        #             self.activate_speed(player)
+        #         elif self.block_type == 'superjump':
+        #             self.super_jump(player)
+        #         self.has_activated = True
+        #         self.disappear()
+        return
     
+    def activate_speed(self, player):
+        if player.speed == 5:
+            player.speed += 2
+            invoke(setattr, player, 'speed', player.speed - 2, delay=2)
+            
     def super_jump(self, player):
         # Get the forward direction (without the y component)
-        direction = ursina.Vec3(player.forward.x, 0, player.forward.z).normalized()  # Get forward direction
-        dash_distance = 5  # How far the dash moves
-        dash_duration = 0.4  # Time it takes to complete the dash
-        target_height = 3.5  # Fixed height for super jump
+        direction = ursina.Vec3(player.forward.x, 0, player.forward.z).normalized() 
+        dash_distance = 5  
+        dash_duration = 0.4 
+        target_height = 3.5  
         
         # Get the player's current position
         original_position = player.position
@@ -85,5 +82,4 @@ class Floor:
         # terrain.texture = 'white_cube'
 
                
-
 

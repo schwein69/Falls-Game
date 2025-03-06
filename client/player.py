@@ -3,6 +3,8 @@ from ursina import *
 import os
 from ursina.prefabs.first_person_controller import FirstPersonController
 
+ICONSCALE = Vec2(0.05, 0.05)
+
 class Player(FirstPersonController):
     def __init__(self, position: ursina.Vec3, username: str):
         super().__init__(
@@ -18,35 +20,9 @@ class Player(FirstPersonController):
         random_color = ursina.color.rgb(random.random(), random.random(), random.random())
         self.cursor.color = random_color
         self.color = random_color
-        # self.gun = ursina.Entity(
-        #     parent=ursina.camera.ui,
-        #     position=ursina.Vec2(0.6, -0.45),
-        #     scale=ursina.Vec3(0.1, 0.2, 0.65),
-        #     rotation=ursina.Vec3(-20, -20, -5),
-        #     model="cube",
-        #     texture="white_cube",
-        #     color=ursina.color.color(0, 0, 0.4)
-        # )
 
-        self.healthbar_pos = ursina.Vec2(0, 0.45)
-        self.healthbar_size = ursina.Vec2(0.8, 0.04)
-        self.healthbar_bg = ursina.Entity(
-            parent=ursina.camera.ui,
-            model="quad",
-            color=ursina.color.rgb(255, 0, 0),
-            position=self.healthbar_pos,
-            scale=self.healthbar_size
-        )
-        self.healthbar = ursina.Entity(
-            parent=ursina.camera.ui,
-            model="quad",
-            color=ursina.color.rgb(0, 255, 0),
-            position=self.healthbar_pos,
-            scale=self.healthbar_size
-        )
-
-
-        self.nameplate = Text(
+        # Player nameplate
+        self.namePlate = Text(
             text=username,
             parent=self,
             position=self.position,  # Position above the player
@@ -54,6 +30,58 @@ class Player(FirstPersonController):
             color=random_color,
             origin=(0, 0),
             billboard=True  # Ensure text always faces the camera
+        )
+
+        # Create a Quad entity as the container for the jump and dash controls
+        self.controls_container = Entity(
+            parent=ursina.camera.ui,
+            model='quad',
+            #color=color.rgba(255, 255, 255, 100),  # Semi-transparent black background
+            position=Vec2(0.6, -0.4),  # Position of the container
+            scale=Vec2(0.20, 0.15)  # Scale of the container
+        )
+
+        # Jump icon (spacebar)
+        self.jump_icon = Entity(
+            parent=self.controls_container,
+            model='quad',
+            texture='spaceIcon.png',  # Replace with your spacebar icon texture
+            position=Vec2(-0.3, 0.1),  # Positioned relative to the container
+            scale=Vec2(0.5, 0.5)
+        )
+
+        # Text under the jump icon
+        self.jump_text = Text(
+            text="Jump",
+            parent=self.controls_container,
+            position=Vec2(-0.3, -0.1),  # Positioned below the jump icon
+            scale=3,
+            color=color.black
+        )
+
+        # Dash icon (mouse click)
+        self.dash_icon = Entity(
+            parent=self.controls_container,
+            model='quad',
+            texture='dashIcon.png',  # Replace with your mouse click icon texture
+            position=Vec2(0.3, 0.1),  # Positioned relative to the container
+            scale=Vec2(0.5, 0.5)
+        )
+
+        # Text under the dash icon
+        self.dash_text = Text(
+            text="Dash",
+            parent=self.controls_container,
+            position=Vec2(0.3, -0.1),  # Positioned below the dash icon
+            scale=3,
+            color=color.black
+        )
+        
+        # Display number of players in the game
+        self.player_count_text = Text(
+            text="Players: 1",
+            position=Vec2(-0.8, 0.45),  # Top left corner
+            scale=1
         )
 
         self.health = 100
@@ -64,7 +92,7 @@ class Player(FirstPersonController):
 
     def update(self):
         
-        self.nameplate.world_position = self.world_position + Vec3(0, 1.5, 0)
+        self.namePlate.world_position = self.world_position + Vec3(0, 1.5, 0)
         
          # If the player is on the ground, reset dash ability
         if self.grounded:
@@ -82,21 +110,19 @@ class Player(FirstPersonController):
             self.can_dash = False  # Disable dashing until grounded again
         else:
             super().update()
+               # Check if the player's y position is below -20
+        if self.y < -20:
+            self.gameOver()
 
         
         
-    def death(self):
-        self.death_message_shown = True
+    def gameOver(self):
+     if not self.death_message_shown:
+            self.death_message_shown = True
+            ursina.Text(
+                text="Game over!",
+                origin=ursina.Vec2(0, 0),
+                scale=3
+            )
 
-        ursina.destroy(self.gun)
-        self.rotation = 0
-        self.camera_pivot.world_rotation_x = -45
-        self.world_position = ursina.Vec3(0, 7, -35)
-        self.cursor.color = ursina.color.rgb(0, 0, 0, a=0)
-
-        ursina.Text(
-            text="You are dead!",
-            origin=ursina.Vec2(0, 0),
-            scale=3
-        )
 

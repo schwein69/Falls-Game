@@ -8,12 +8,14 @@ from floor import *
 from light import *
 from ursina.shaders import lit_with_shadows_shader 
 from direct.stdpy import thread # we need threading to load entities in the background (this is specific to ursina, standard threading wouldn't work)
+from ursina import *
+from splashScreen import SplashScreen
 
 loading_screen = None
 local_play_button = None
 online_play_button = None
 game_title_text = None
-
+        
 def loadLevel():
     global loading_screen
     floor = Floor()
@@ -24,7 +26,7 @@ def loadLevel():
         double_sided=True
     )
 
-    player = Player(ursina.Vec3(0, 30, 0))
+    player = Player(ursina.Vec3(0, 30, 0),"Luca")
     player.shade = lit_with_shadows_shader  
 
     camera.z = -5
@@ -39,7 +41,10 @@ def showLoadingScreen():
     destroy(local_play_button)
     destroy(online_play_button)
     destroy(game_title_text)
-    loading_screen  = Entity(model='quad', texture='ursina_logo')
+    ursina_splash = SplashScreen()
+    # add a custom splash screen after the first one
+    ursina_splash.on_destroy = Func(SplashScreen, 'shore')
+    #loading_screen  = Entity(model='quad', texture='ursina_logo')
     # Wait for 3 seconds before loading the level
     ursina.invoke(loadLevel, delay=2)
     
@@ -54,7 +59,7 @@ def showMenu():
   
 # Create the start menu
 if __name__ == '__main__':
-    app = ursina.Ursina()
+    app = Ursina()
     ursina.window.borderless = False
     ursina.window.title = "Falls Game - Ursina"
     ursina.window.exit_button.visible = False
