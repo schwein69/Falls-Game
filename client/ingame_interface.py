@@ -1,1 +1,0 @@
-#ping left top, number of players alive on the top right 

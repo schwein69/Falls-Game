@@ -2,10 +2,10 @@ import ursina
 from ursina import *
 from numpy import floor
 
-GRID_SIZE = 18
+GRID_SIZE = 7
 FLOOR_HEIGHT = 10
-FLOOR_COUNT = 3  
-CUBE_SCALE = 1.5
+FLOOR_COUNT = 5 
+CUBE_SCALE = 2
 BLOCK_TYPES = ['normal', 'speed', 'superjump']
 
 # Block probabilities
@@ -19,7 +19,7 @@ class FloorCube(ursina.Entity):
         super().__init__(
             position=position,
             scale=CUBE_SCALE,
-            model="plane",
+            model="cube",
             collider="box",
             texture = "white_cube"
         )
@@ -72,10 +72,10 @@ class Floor:
         terrain = Entity(model=None, collider=None)
         for floor in range(FLOOR_COUNT):
           y = floor * FLOOR_HEIGHT  # Set the height for each floor
-          grid_size = GRID_SIZE - floor * 5  # Increase grid size for each lower floor
-          for z in range(-grid_size, grid_size):
-              for x in range(-grid_size, grid_size):
-                block = FloorCube(ursina.Vec3(x * CUBE_SCALE, y, z * CUBE_SCALE), get_random_block_type())
+          #grid_size = GRID_SIZE - floor * 5  # Increase grid size for each lower floor
+          for z in range(-GRID_SIZE, GRID_SIZE):
+              for x in range(-GRID_SIZE, GRID_SIZE):
+                block = FloorCube(Vec3(x * CUBE_SCALE, y, z * CUBE_SCALE), get_random_block_type())
                 block.parent = terrain
         # terrain.combine()
         # terrain.collider = 'mesh'
