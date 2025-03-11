@@ -5,10 +5,8 @@ import threading
 from ursina import Ursina
 from player import Player
 from floor import *
-from light import *
-from ursina.shaders import lit_with_shadows_shader 
 from usefulFunctions import get_random_position
-import cProfile
+
 def to_first_person():
     camera.position = (0, 0, 0)
 
@@ -19,8 +17,9 @@ app = Ursina()
 window.borderless = False
 window.title = "Fall guys ursina"
 window.exit_button.visible = False
-window.entity_counter.visible = False
-window.collider_counter.visible = False
+window.entity_counter.visible = True
+window.collider_counter.visible = True
+
 
 floor = Floor()
 sky = Entity(
@@ -31,18 +30,22 @@ sky = Entity(
 )
 
 player = Player(get_random_position(),"Luca")
-player.shade = lit_with_shadows_shader  
-
 camera.z = -5
 prev_pos = player.world_position
 prev_dir = player.world_rotation_y
 enemies = []
+
 
 # def update():
 #     hit_info = player.intersects(floor)
 #     if hit_info.hit and isinstance(hit_info.entity, FloorCube):
 #         hit_info.entity.on_step(player)
 def update():
+    for entity in scene.entities:
+        if isinstance(entity, FloorCube):
+            entity.updateColliders(player)
+
+        
     hit_info = player.intersects()
     if hit_info.hit and isinstance(hit_info.entity, FloorCube):
         hit_info.entity.on_step(player)
