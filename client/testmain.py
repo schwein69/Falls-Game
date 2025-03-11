@@ -18,7 +18,7 @@ window.borderless = False
 window.title = "Fall guys ursina"
 window.exit_button.visible = False
 window.entity_counter.visible = True
-window.collider_counter.visible = False
+window.collider_counter.visible = True
 
 
 floor = Floor()
@@ -41,6 +41,11 @@ enemies = []
 #     if hit_info.hit and isinstance(hit_info.entity, FloorCube):
 #         hit_info.entity.on_step(player)
 def update():
+    for entity in scene.entities:
+        if isinstance(entity, FloorCube):
+            entity.updateColliders(player)
+
+        
     hit_info = player.intersects()
     if hit_info.hit and isinstance(hit_info.entity, FloorCube):
         hit_info.entity.on_step(player)

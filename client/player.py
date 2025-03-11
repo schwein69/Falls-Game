@@ -19,14 +19,16 @@ class Player(FirstPersonController):
         random_color = color.rgb(random.random(), random.random(), random.random())
         self.cursor.color = random_color
         self.color = random_color
-        
+        # self.gravity = 0
         self.gui = InGameGui(username)
         self.death_message_shown = False
         self.is_jumping = False  # Track if player is jumping
         self.can_dash = True  # Allows dashing once per jump
 
+
     def update(self):
-        self.gui.namePlate.world_position = self.world_position + Vec3(0, 1.5, 0)
+        if self.gui and self.gui.namePlate:
+            self.gui.namePlate.world_position = self.world_position + Vec3(0, 1.5, 0)
         
         if self.grounded:
             self.can_dash = True
@@ -42,8 +44,8 @@ class Player(FirstPersonController):
         else:
             super().update()
         
-        if self.y < -20:
-            self.gameOver()
+        # if self.y < -20:
+        #     self.gameOver()
         
     def gameOver(self):
         if not self.death_message_shown:
@@ -53,3 +55,7 @@ class Player(FirstPersonController):
                 origin=Vec2(0, 0),
                 scale=3
             )
+    #         invoke(self.resetGame, delay=2)  # Wait 2 seconds before returning to menu
+             
+    # def resetGame(self):
+    #     destroy(self)

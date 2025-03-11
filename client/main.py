@@ -16,9 +16,15 @@ online_play_button = None
 game_title_text = None
 player = None  # Declare player as a global variable
 floor = None  # Declare floor as a global variable
+sky = None # Declare sky as a global variable
+game_over = False # Declare game over as a global variable
+level_loaded = False
 
 def loadLevel():
-    global loading_screen, player, floor  # Reference global variables
+    global loading_screen, player, floor, sky , level_loaded ,game_over  # Reference global variables
+    destroy(loading_screen)  # delete the loading screen when finished
+    game_over = False,
+    level_loaded = True
     floor = Floor()
     sky = ursina.Entity(
         model="sphere",
@@ -34,7 +40,8 @@ def loadLevel():
     prev_dir = player.world_rotation_y
     enemies = []
 
-    destroy(loading_screen)  # delete the loading screen when finished
+    
+    
 
 def showLoadingScreen():
     global loading_screen, local_play_button, online_play_button, game_title_text  # Referencing all global entities to destroy them
@@ -56,13 +63,44 @@ def showMenu():
     local_play_button = ursina.Button(text='Local Play', scale=(0.3, 0.1), position=(0, 0.1), on_click=showLoadingScreen)
     online_play_button = ursina.Button(text='Online Play', scale=(0.3, 0.1), position=(0, -0.1))  # Placeholder
 
-
+def resetPlayer():
+    global player, floor, loading_screen, local_play_button, online_play_button, game_title_text, game_over, level_loaded, sky
+    player = None  # Clear the player reference
+    destroy(sky)
+    sky = None  # Clear the sky reference
+    game_over = False  # Reset the game_over flag
+    level_loaded = False  # Reset the level_loaded flag
+    
+def resetFloor():
+    global floor
+    floor.resetGame()
+    floor = None  
+    showMenu()
 def update():
-    global player, floor  
+    global player, floor, game_over, level_loaded
+    
+    if game_over == True:
+        return
+    if level_loaded == False:
+        return
+        
+    if not player or not floor:  # Prevent running update logic if player is None
+        return
+    
+    for entity in scene.entities:
+        if isinstance(entity, FloorCube):
+            entity.updateColliders(player)
+            
     if player and floor:
         hit_info = player.intersects()
         if hit_info.hit and isinstance(hit_info.entity, FloorCube):
             hit_info.entity.on_step(player)
+            
+    if player.world_position.y < -20:
+        player.gameOver()
+  
+        
+        
 
 
 def input(key):
@@ -82,5 +120,5 @@ if __name__ == '__main__':
     window.collider_counter.visible = False
 
     showMenu()
-
+    
     app.run()
