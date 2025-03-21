@@ -1,18 +1,17 @@
 from ursina import *
 
 class InGameGui(Entity):
-    def __init__(self, username="Player", player_count=1):
+    def __init__(self, username, player_count=1, player_entity=None):
         super().__init__()
         random_color = color.random_color()
         
         # Nameplate above player
         self.namePlate = Text(
             text=username,
-            parent=self,
-            position=self.position,  # Position above the player
+            parent=player_entity,
             scale=5,
             color=random_color,
-            origin=(0, 0),
+            origin=(0,-5),
             billboard=True  # Ensure text always faces the camera
         )
         

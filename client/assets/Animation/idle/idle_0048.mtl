@@ -1,0 +1,22 @@
+# Blender 4.3.2 MTL File: 'None'
+# www.blender.org
+
+newmtl mini_material.001
+Ns 0.000000
+Ka 1.000000 1.000000 1.000000
+Ks 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 1
+map_Kd C:/mini_material_baseColor.png
+map_Ke C:/mini_material_baseColor.png
+
+newmtl mini_material_secondary.001
+Ns 0.000000
+Ka 1.000000 1.000000 1.000000
+Ks 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 1
+map_Kd C:/mini_material_baseColor.png
+map_Ke C:/mini_material_baseColor.png

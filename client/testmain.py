@@ -7,6 +7,7 @@ from player import Player
 from floor import *
 from usefulFunctions import get_random_position
 
+
 def to_first_person():
     camera.position = (0, 0, 0)
 
@@ -49,6 +50,7 @@ def update():
     hit_info = player.intersects()
     if hit_info.hit and isinstance(hit_info.entity, FloorCube):
         hit_info.entity.on_step(player)
+        # print(player.position)
 # def update():
 #     if player.intersects(floor).hit:
 #         print("Player is colliding with block!")

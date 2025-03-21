@@ -4,7 +4,7 @@ from ursina import *
 GRID_SIZE = 7
 FLOOR_HEIGHT = 10
 FLOOR_COUNT = 5 
-CUBE_SCALE = 2
+CUBE_SCALE = 2.5
 BLOCK_TYPES = ['normal', 'speed', 'superjump']
 
 # Block probabilities
@@ -20,7 +20,7 @@ class FloorCube(Entity):
             scale=CUBE_SCALE,
             model="cube",
             #collider="box",
-            texture = "white_cube"
+            texture = "floortxt"
         )
         self.block_type = block_type
         self.color = color.white if block_type == 'normal' else (color.green if block_type == 'speed' else color.blue)
@@ -49,7 +49,7 @@ class FloorCube(Entity):
     
     def disappear(self):
         self.is_disappearing = True
-        self.animate('y', self.y - 0.25, duration=1)
+        self.animate('y', self.y - 0.20, duration=1)
         self.animate('color', color.gray, duration =1)
        # invoke(setattr, self, 'collider', None, delay=2)
         destroy(self, delay=1.5)
