@@ -2,7 +2,6 @@ import os
 import sys
 import socket
 import threading
-import ursina
 from player import Player
 from floor import *
 from direct.stdpy import thread  # we need threading to load entities in the background (this is specific to ursina, standard threading wouldn't work)
@@ -15,17 +14,17 @@ local_play_button = None
 online_play_button = None
 game_title_text = None
 player = None  # Declare player as a global variable
-floor = None  # Declare floor as a global variable
+floors = None  # Declare floor as a global variable
 sky = None # Declare sky as a global variable
 game_over = False # Declare game over as a global variable
 level_loaded = False
 
 def loadLevel():
-    global loading_screen, player, floor, sky , level_loaded ,game_over  # Reference global variables
+    global loading_screen, player, floors, sky , level_loaded ,game_over  # Reference global variables
     destroy(loading_screen)  # delete the loading screen when finished
-    game_over = False,
+    game_over = False
     level_loaded = True
-    floor = Floor()
+    floors = Floor()
     sky = ursina.Entity(
         model="sphere",
         texture=os.path.join("assets", "sky.png"),
@@ -64,7 +63,7 @@ def showMenu():
     online_play_button = ursina.Button(text='Online Play', scale=(0.3, 0.1), position=(0, -0.1))  # Placeholder
 
 def resetPlayer():
-    global player, floor, loading_screen, local_play_button, online_play_button, game_title_text, game_over, level_loaded, sky
+    global player, floors, loading_screen, local_play_button, online_play_button, game_title_text, game_over, level_loaded, sky
     player = None  # Clear the player reference
     destroy(sky)
     sky = None  # Clear the sky reference
@@ -72,19 +71,19 @@ def resetPlayer():
     level_loaded = False  # Reset the level_loaded flag
     
 def resetFloor():
-    global floor
-    floor.resetGame()
-    floor = None  
+    global floors
+    floors.resetGame()
+    floors = None  
     showMenu()
 def update():
-    global player, floor, game_over, level_loaded
+    global player, floors, game_over, level_loaded
     
     if game_over == True:
         return
     if level_loaded == False:
         return
         
-    if not player or not floor:  # Prevent running update logic if player is None
+    if player is None or floors is None:  # Prevent running update logic if player is None
         return
     
     for entity in scene.entities:
