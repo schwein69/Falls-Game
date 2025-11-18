@@ -1,8 +1,7 @@
-import ursina
 from ursina import *
-import os
 from ursina.prefabs.first_person_controller import FirstPersonController
 from inGameGui import InGameGui
+
 
 class Player(FirstPersonController):
     def __init__(self, position: Vec3, username: str):
@@ -18,7 +17,14 @@ class Player(FirstPersonController):
 
         random_color = color.rgb(random.random(), random.random(), random.random())
         self.cursor.color = random_color
-        self.gui = InGameGui(username=username, player_entity=self)
+       
+        # Initialize GUI safely
+        try:
+            self.gui = InGameGui(username=username, player_entity=self)
+        except Exception as e:
+            print(f"[WARNING] Failed to initialize InGameGui: {e}")
+            self.gui = None
+        
         self.death_message_shown = False
         self.can_dash = True  
         self.is_jumping = False  
