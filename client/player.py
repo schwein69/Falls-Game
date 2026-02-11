@@ -1,85 +1,151 @@
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 from inGameGui import InGameGui
-
+import random
 
 class Player(FirstPersonController):
     def __init__(self, position: Vec3, username: str):
         super().__init__(
             position=position,
-            model= "collisionModel", 
+            model="collisionModel",
             jump_height=2.5,
             jump_duration=0.4,
-            # origin_y= -0.2,
             collider="capsule",
             speed=5
         )
 
+        # Random cursor color
         random_color = color.rgb(random.random(), random.random(), random.random())
-        self.cursor.color = random_color
-       
-        # Initialize GUI safely
+        if hasattr(self, 'cursor') and self.cursor:
+            self.cursor.color = random_color
+
+        # GUI Setup
+        self.gui = None
+        self.namePlate = None
         try:
             self.gui = InGameGui(username=username, player_entity=self)
+            self.namePlate = getattr(self.gui, "namePlate", None)
         except Exception as e:
             print(f"[WARNING] Failed to initialize InGameGui: {e}")
-            self.gui = None
-        
+
+        # State
         self.death_message_shown = False
-        self.can_dash = True  
-        self.is_jumping = False  
-
-        # Load animations 
-        self.idleAnimation = FrameAnimation3d("idle_", fps=24, loop=True, autoplay=True,
-                                             frame_times=50, texture="mini_material_baseColor",origin_y= -0.2)
-        self.walkingAnimation = FrameAnimation3d("untitled_", fps=24, loop=True, autoplay=True,
-                                                  frame_times=50, texture="mini_material_baseColor",origin_y= -0.2)
-        self.runningAnimation = FrameAnimation3d("run_", fps=24, loop=True, autoplay=True,
-                                                 frame_times=50, texture="mini_material_baseColor",origin_y= -0.2)
-        self.jumpingAnimation = FrameAnimation3d("jump_", fps=24, loop=True, autoplay=True,
-                                                 frame_times=50, texture="mini_material_baseColor",origin_y= -0.2)
-
+        self.can_dash = True
+        
+        self.load_animations()
+     
+    def load_animations(self):
+        try:
+            # Using the exact names you provided
+            self.idleAnimation = FrameAnimation3d("idle_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
+            self.walkingAnimation = FrameAnimation3d("untitled_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
+            self.runningAnimation = FrameAnimation3d("run_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
+            self.jumpingAnimation = FrameAnimation3d("jump_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
+        except:
+            print("Animations failed to load")
+            self.idleAnimation = None
 
     def update(self):
-        if self.gui and self.gui.namePlate:
+        # Nameplate
+        if getattr(self, 'gui', None) and getattr(self.gui, 'namePlate', None):
             self.gui.namePlate.world_position = self.world_position + Vec3(0, 1.5, 0)
 
-        if self.grounded:
-            self.can_dash = True
-
+        # Logic
+        self.can_dash = self.grounded
         is_jumping = not self.grounded
-
         is_walking = held_keys['w'] or held_keys['a'] or held_keys['s'] or held_keys['d']
 
-        # # Determine which animation to play based on speed
-        if not is_walking:
+        # Animation Switching
+        if is_jumping and self.jumpingAnimation:
+            self.switch_animation(self.jumpingAnimation)
+        elif not is_walking and self.idleAnimation:
             self.switch_animation(self.idleAnimation)
-        elif is_walking and self.speed > 5:
+        elif is_walking and self.speed > 5 and self.runningAnimation:
             self.switch_animation(self.runningAnimation)
-        elif is_walking and self.speed <= 5:
+        elif is_walking and self.speed <= 5 and self.walkingAnimation:
             self.switch_animation(self.walkingAnimation)
 
-        if is_jumping:
-            self.switch_animation(self.jumpingAnimation)
-            
+        # Dash
         if mouse.left and self.can_dash and is_jumping:
             direction = Vec3(self.forward.x, 0, self.forward.z).normalized()
-            dash_distance = 5
-            dash_duration = 0.3
-            self.switch_animation(self.jumpingAnimation)
-            self.animate_position(self.position + direction * dash_distance, duration=dash_duration, curve=curve.linear)
+            self.animate_position(self.position + direction * 5, duration=0.3, curve=curve.linear)
             self.can_dash = False
-        else:
-            super().update()
+
+        super().update()
 
     def switch_animation(self, new_animation):
-        self.model = new_animation
+        if self.model != new_animation:
+            self.model = new_animation
 
     def gameOver(self):
         if not self.death_message_shown:
             self.death_message_shown = True
-            Text(
-                text="Game over!",
-                origin=Vec2(0, 0),
-                scale=3
-            )
+            Text(text="Game over!", origin=Vec2(0, 0), scale=3)
+
+
+# =========================================================
+# 2. REMOTE PLAYER 
+# =========================================================
+class RemotePlayer(Entity):
+    def __init__(self, position: Vec3, username: str):
+        super().__init__(
+            position=position,
+            model=None,           # CHANGED: Set to None so the "wrapper" is invisible
+            collider="box",       # Keep collider for clicking/physics, but it won't render
+            scale=1
+        )
+        self.username = username
+        self.name_tag = Text(text=username, parent=scene, y=2.5, scale=5, billboard=True, color=color.white)
+        
+        self.prev_pos = position
+        
+        # Load animations (Same as before)
+        self.load_animations()
+
+    def load_animations(self):
+        try:
+            # Note: Ensure texture names are correct
+            self.idleAnimation = FrameAnimation3d("idle_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
+            self.walkingAnimation = FrameAnimation3d("untitled_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
+            self.runningAnimation = FrameAnimation3d("run_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
+            self.jumpingAnimation = FrameAnimation3d("jump_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
+            self.switch_animation(self.idleAnimation)
+        except:
+            print(f"Remote Animations failed to load")
+
+    def switch_animation(self, new_animation):
+        animations = [self.idleAnimation, self.walkingAnimation, self.runningAnimation, self.jumpingAnimation]
+        for anim in animations:
+            if anim:
+                anim.enabled = (anim == new_animation)
+
+    def update(self):
+        # 1. Update Name Tag
+        self.name_tag.world_position = self.world_position + Vec3(0, 1.5, 0)
+
+        # 2. Calculate Movement Vector
+        move_vec = self.position - self.prev_pos
+        horizontal_speed = Vec3(move_vec.x, 0, move_vec.z).length()
+        
+        # 3. ROTATION FIX: Look at where we are going
+        # We only rotate if the player is actually moving (to avoid snapping to 0 when idle)
+        if horizontal_speed > 0.001:
+            # 'look_at' rotates the entity to face a target point.
+            # Target = Current Position + Direction we are moving
+            self.look_at(self.position + Vec3(move_vec.x, 0, move_vec.z), axis='forward')
+            
+            # Lock X and Z rotation so they don't tilt up/down (only spin left/right)
+            self.rotation_x = 0
+            self.rotation_z = 0
+
+        # 4. Animation Logic
+        if self.position.y > 1.0 and abs(move_vec.y) > 0.01: 
+             self.switch_animation(self.jumpingAnimation)
+        elif horizontal_speed > 0.1: # Adjust based on your scale
+             self.switch_animation(self.runningAnimation)
+        elif horizontal_speed > 0.001:
+             self.switch_animation(self.walkingAnimation)
+        else:
+             self.switch_animation(self.idleAnimation)
+
+        self.prev_pos = self.position
