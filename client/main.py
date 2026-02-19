@@ -1,4 +1,5 @@
 import os
+import redis
 from ursina import *
 from config import *
 from player import Player, RemotePlayer
@@ -7,11 +8,14 @@ from splashScreen import SplashScreen
 from usefulFunctions import *
 from network import NetworkManager
 from network_discovery import DiscoveryBroadcaster, DiscoveryListener
+import threading    
+import time
 
 # --------------------------
-# 1. GLOBAL GAME STATE
+# GLOBAL GAME STATE
 # --------------------------
 app = Ursina()
+r = redis.Redis(host='localhost', port=6379, db=0) # For matchmaking server communication
 loading_screen = None
 player = None
 floors = None
@@ -20,6 +24,7 @@ other_players = {}  # player_id -> RemotePlayer instance
 guiElements = []
 player_labels = []
 lobby_buttons = []
+
 
 game_over = False
 level_loaded = False
@@ -30,7 +35,7 @@ broadcaster: DiscoveryBroadcaster = None
 current_listener: DiscoveryListener = None
 
 # --------------------------
-# 2. GENERIC UI HELPERS
+# UI elements
 # --------------------------
 def clear_all_ui_elements():
     for e in camera.ui.children:
@@ -48,49 +53,74 @@ def display_error_message_screen(message, on_close_callback):
     guiElements.extend([msg, btn])
 
 # --------------------------
-# 3. RPC HANDLERS (Game Logic)
+# RPC HANDLERS 
 # --------------------------
-def rpc_spawn_player(pid, x, y, z):
+# This is called when we receive a spawn RPC for another player. We create a RemotePlayer instance for them and store it in other_players dict.
+def rpc_spawn_player(pid, x, y, z, status="alive" , matchId=None):
     global other_players
-    # Don't spawn yourself, and don't spawn a duplicate
     if network_manager and pid == network_manager.player_id:
         return
     if pid in other_players:
         return
     
     print(f"[Game] Spawning Remote Player {pid}")
+    r.set(f"player:{pid}:pos:status:matchId", f"{x},{y},{z}", status, matchId)
     # Use RemotePlayer class for others
     new_p = RemotePlayer(position=Vec3(x, y, z), username=f"Player {pid}")
     other_players[pid] = new_p
-def rpc_update_pos(pid, x, y, z):
-    """Received when a player moves"""
+    
+# This is called when we receive a position update from another player    
+def rpc_update_pos(pid, x, y, z,matchId=None):
     global other_players
     if pid in other_players:
         # Update remote player position
         other_players[pid].position = Vec3(x, y, z)
+        r.set(f"player:{pid}:pos:matchId", f"{x},{y},{z}",matchId)
     elif pid != network_manager.player_id:
         # If player not found, spawn them
-        rpc_spawn_player(pid, x, y, z)
+        rpc_spawn_player(pid, x, y, z, matchId)
 
+# This is called when we receive a player left message. We destroy their RemotePlayer instance and remove them from other_players dict.
 def rpc_player_left(pid):
     global other_players
     if pid in other_players:
         print(f"[Game] Player {pid} Left")
         destroy(other_players[pid])
         del other_players[pid]
-        
+        r.delete(f"player:{pid}:pos:status:matchId")
+        r.delete(f"status:player:{pid}")
+
+# This is called when the host starts the game. We set lobby_open to False and load the level for everyone. The host also calls this locally when they click "Start Game" in the lobby.        
 def rpc_start_game():
     global lobby_open
     print("[Game] Host started the game")
     lobby_open = False
     loadLevel()
+
+def rpc_handle_disconnection(pid):
+    print(f"[Game] Player {pid} disconnected. Game Paused. Waiting {REJOIN_TIMER}s...")
+    r.set(f"status:player:{pid}", "awaiting_rejoin",ex=REJOIN_GRACE_PERIOD)  
     
+    start_time = time.time()
+    rejoined = False
+    
+    current_status = r.get(f"status:player:{pid}")
+    if current_status and current_status.decode() == "awaiting_rejoin":
+        print(f"[Game] Player {pid} failed to rejoin in time. Marking as left.")
+        rpc_player_left(pid)
+    else:
+        print(f"[Game] Player {pid} rejoined successfully.")
+def on_client_lost(player_id, match_id):
+    # Avviamo il thread di attesa senza bloccare il server principale
+    t = threading.Thread(target=rpc_handle_disconnection, args=(player_id, match_id))
+    t.start()        
 # Map string names to functions
 RPC_REGISTRY = {
     "spawn_player": rpc_spawn_player,
     "update_pos": rpc_update_pos,
     "player_left": rpc_player_left,
-    "start_game": rpc_start_game
+    "start_game": rpc_start_game,
+    "rejoin_player": on_client_lost 
 }
 
 def handle_rpc(data):
@@ -149,7 +179,7 @@ def resetFloor():
     invoke(show_main_menu_screen, delay=1)
 
 # --------------------------
-# 5. NETWORK SESSION CONTROLS
+# NETWORK SESSION CONTROLS
 # --------------------------
 def start_local_host_session():
     global network_manager, broadcaster
@@ -232,7 +262,7 @@ def connect_to_p2p_host(ip, listener):
         display_error_message_screen("Connection failed.", lambda: show_local_mode_menu())
 
 # --------------------------
-# 7. LOBBY SYSTEM
+# LOBBY SYSTEM
 # --------------------------
 def show_lobby_screen():
     global lobby_open
@@ -287,7 +317,7 @@ def leave_lobby():
     show_main_menu_screen()
 
 # --------------------------
-# 8. MAIN MENU
+# MAIN MENU
 # --------------------------
 def show_main_menu_screen():
     clear_all_ui_elements()
@@ -303,7 +333,7 @@ def show_local_mode_menu():
     Button('Back', scale=(0.3,0.1), position=(0,-0.2), parent=camera.ui, on_click=show_main_menu_screen)
 
 # --------------------------
-# 9. GAME UPDATE LOOP
+# GAME UPDATE LOOP
 # --------------------------
 def update():
     global game_over, level_loaded

@@ -8,7 +8,7 @@ MAX_PLAYERS = 4                  # Max players per game lobby
 # Heartbeat settings (seconds)
 HEARTBEAT_INTERVAL = 1
 HEARTBEAT_TIMEOUT = 5
-REJOIN_GRACE_PERIOD = 15
+REJOIN_GRACE_PERIOD = 10
 REJOIN_TIMER = 3.0
 MATCHMAKING_HOSTNAME = "fallsgame.dedyn.io"  # Hostname for matchmaking server
 SERVER_BIND = ""  # Bind to all interfaces

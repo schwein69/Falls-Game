@@ -84,14 +84,14 @@ class Player(FirstPersonController):
 
 
 # =========================================================
-# 2. REMOTE PLAYER 
+# REMOTE PLAYER 
 # =========================================================
 class RemotePlayer(Entity):
     def __init__(self, position: Vec3, username: str):
         super().__init__(
             position=position,
-            model=None,           # CHANGED: Set to None so the "wrapper" is invisible
-            collider="box",       # Keep collider for clicking/physics, but it won't render
+            model=None,           
+            collider="capsule",      
             scale=1
         )
         self.username = username
@@ -120,28 +120,20 @@ class RemotePlayer(Entity):
                 anim.enabled = (anim == new_animation)
 
     def update(self):
-        # 1. Update Name Tag
         self.name_tag.world_position = self.world_position + Vec3(0, 1.5, 0)
 
-        # 2. Calculate Movement Vector
         move_vec = self.position - self.prev_pos
         horizontal_speed = Vec3(move_vec.x, 0, move_vec.z).length()
         
-        # 3. ROTATION FIX: Look at where we are going
-        # We only rotate if the player is actually moving (to avoid snapping to 0 when idle)
         if horizontal_speed > 0.001:
-            # 'look_at' rotates the entity to face a target point.
-            # Target = Current Position + Direction we are moving
             self.look_at(self.position + Vec3(move_vec.x, 0, move_vec.z), axis='forward')
             
-            # Lock X and Z rotation so they don't tilt up/down (only spin left/right)
             self.rotation_x = 0
             self.rotation_z = 0
-
-        # 4. Animation Logic
+        # Animation Logic
         if self.position.y > 1.0 and abs(move_vec.y) > 0.01: 
              self.switch_animation(self.jumpingAnimation)
-        elif horizontal_speed > 0.1: # Adjust based on your scale
+        elif horizontal_speed > 0.1:
              self.switch_animation(self.runningAnimation)
         elif horizontal_speed > 0.001:
              self.switch_animation(self.walkingAnimation)
