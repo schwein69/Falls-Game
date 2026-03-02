@@ -2,15 +2,14 @@ import socket
 import threading
 import queue
 import json
-from config import * # Ensure P2P_PORT, SERVER_IP, SERVER_PORT, MAX_PLAYERS are here
+import time
+from config import * 
 
 class NetworkManager:
     def __init__(self, mode='p2p'):
         self.mode = mode # 'p2p' or 'online'
         self.sock = None
         self.running = False
-        
-        # Identity
         self.player_id = None
         self.host_ip = None
         self.host_port = P2P_PORT
@@ -18,6 +17,7 @@ class NetworkManager:
         
         # Connected Clients (Only used if self.is_host == True)
         self.clients = {} 
+        self.disconnected_clients = {} # Track disconnected clients for cleanup
         
         self.msg_queue = queue.Queue()
         self.lock = threading.Lock()
@@ -142,29 +142,35 @@ class NetworkManager:
         
         if self.is_host:
             if "JOIN_REQUEST" in msg:
+                if addr_ip in self.disconnected_clients:
+                    old_pid, _ = self.disconnected_clients.pop(addr_ip)
+                    self.clients[addr_ip] = (old_pid, addr_port)
+                    self.sock.sendto(f"ASSIGN_ID|{old_pid}|{P2P_PORT}".encode(), addr)
+                    print(f"[Host] Player {old_pid} reconnected! Resuming game.")
+                    self.send_rpc("game_pause", False, old_pid)
+                    spawn_payload = {"method": "spawn_player", "args": [old_pid, 0, 5, 0], "sender_id": 0}
+                    self.msg_queue.put(spawn_payload)
+                    self.send_raw(json.dumps(spawn_payload))
+                    return
+
                 if len(self.clients) < MAX_PLAYERS:
-                    # 1. Assign new ID
-                    new_id = len(self.clients) + 1
-                    
-                    # 2. Tell the NEW player their ID
+                    new_id = len(self.clients) + len(self.disconnected_clients) + 1
+                    self.clients[addr_ip] = (new_id, addr_port)
                     self.sock.sendto(f"ASSIGN_ID|{new_id}|{P2P_PORT}".encode(), addr)
                     
-                    # 3. Tell the NEW player about EVERYONE else (including the Host)
-                    # Send Host (ID 0)
-                    host_spawn = {"method": "spawn_player", "args": [0, 0, 5, 0], "sender_id": 0}
-                    self.sock.sendto(json.dumps(host_spawn).encode(), addr)
-                    
-                    # Send all other connected clients
-                    for ip, (pid, port) in self.clients.items():
-                        other_spawn = {"method": "spawn_player", "args": [pid, 0, 5, 0], "sender_id": 0}
-                        self.sock.sendto(json.dumps(other_spawn).encode(), addr)
+                    spawn_payload = {"method": "spawn_player", "args": [new_id, 0, 5, 0], "sender_id": 0}
+                    self.msg_queue.put(spawn_payload)
+                    self.send_raw(json.dumps(spawn_payload))
 
-                    # 4. Add new player to host list and notify EXISTING players
-                    self.clients[addr_ip] = (new_id, addr_port)
+            elif msg == "DISCONNECT":
+                if addr_ip in self.clients:
+                    pid, _ = self.clients.pop(addr_ip)
+                    print(f"[Host] Player {pid} disconnected. Starting {REJOIN_TIMER}s grace period...")
+                    self.disconnected_clients[addr_ip] = (pid, time.time())
+                    self.send_rpc("game_pause", True, pid)
                     
-                    broadcast_payload = {"method": "spawn_player", "args": [new_id, 0, 5, 0], "sender_id": 0}
-                    self.msg_queue.put(broadcast_payload) # Spawn on Host's screen
-                    self.relay_broadcast(json.dumps(broadcast_payload), exclude_ip=addr_ip) # Spawn on others
+                    # Start a thread to check if they rejoin in time
+                    threading.Thread(target=self.check_rejoin_timeout, args=(addr_ip, pid), daemon=True).start()
 
         else: # Client Side
             if msg.startswith("ASSIGN_ID"):
@@ -172,6 +178,22 @@ class NetworkManager:
                 self.player_id = int(parts[1])
                 print(f"[Network] Joined successfully. My ID: {self.player_id}")
 
+    def check_rejoin_timeout(self, addr_ip, pid):
+        """Host waits REJOIN_TIMER seconds. If player hasn't rejoined, kick them."""
+        time.sleep(REJOIN_TIMER) 
+        
+        with self.lock:
+            if addr_ip in self.disconnected_clients:
+                del self.disconnected_clients[addr_ip]
+                print(f"[Host] Player {pid} failed to rejoin. Removing from match.")
+                
+                # Unpause the game and delete them
+                self.send_rpc("game_pause", False, pid)
+                
+                leave_payload = {"method": "player_left", "args": [pid], "sender_id": 0}
+                self.msg_queue.put(leave_payload)
+                self.send_raw(json.dumps(leave_payload))
+                
     def process_queue(self, rpc_handler_func):
         while not self.msg_queue.empty():
             rpc_handler_func(self.msg_queue.get_nowait())
