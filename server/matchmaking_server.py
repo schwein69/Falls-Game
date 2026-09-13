@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-Matchmaking server with embedded plain-text HTTP dashboard on port 8080.
-
-- TCP matchmaking server accepts clients, groups players into games.
-- Starts game instances on new ports.
-- Dashboard available at http://<host>:8080/ showing queue and active games.
-"""
-
 import socket
 import threading
 import subprocess
@@ -16,6 +7,8 @@ import sys
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
 from config import *
 
 status_file = os.path.join(os.path.dirname(__file__), "status.json")
@@ -23,7 +16,7 @@ status_file = os.path.join(os.path.dirname(__file__), "status.json")
 pending_clients = []  # list of (player_id, client_ip, udp_port, tcp_conn)
 active_games = {}     # port -> {players: [...], start_ts: ...}
 next_game_port = GAME_INSTANCE_BASE_PORT
-port_lock = threading.Lock()
+port_lock = threading.Lock() 
 
 
 def write_status():
@@ -64,7 +57,8 @@ def handle_client(conn, addr):
                 players_json = json.dumps(players_info)
 
                 print(f"{LOG_PREFIX} Spawning game instance on port {game_port} for players: {[p[0] for p in players_info]}")
-                subprocess.Popen([sys.executable, "server/game_instance.py", str(game_port), players_json])
+                game_instance_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_instance.py")
+                subprocess.Popen([sys.executable, game_instance_path, str(game_port), players_json])
 
                 active_games[game_port] = {
                     "players": [p[0] for p in players_info],
@@ -102,7 +96,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self.send_response(200)
-            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.send_header("Content-type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
 
@@ -115,8 +109,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             pending = status.get("pending", [])
             active_games_data = status.get("active_games", {})
-            timestamp = status.get("timestamp", 0)
-            timestr = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
             lines = []
             lines.append(f"Matchmaking Queue: {len(pending)} player(s)")
@@ -131,10 +123,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     player_list = ", ".join(info.get("players", []))
                     lines.append(f" - Port {port}: {player_list}")
             lines.append("")
-            lines.append(f"Last update: {timestr}")
-            lines.append("Page refreshes every 5 seconds.")
 
-            self.wfile.write("\n".join(lines).encode())
+            html_page = (
+                "<html><head><meta http-equiv=\"refresh\" content=\"5\"></head>"
+                "<body><pre>" + "\n".join(lines) + "</pre></body></html>"
+            )
+            self.wfile.write(html_page.encode())
 
         elif self.path == "/status.json":
             self.send_response(200)
@@ -155,9 +149,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def run_dashboard_server():
-    server_address = ("", 8080)  # Now runs on 8080
+    server_address = ("", 8081) 
     httpd = ThreadedHTTPServer(server_address, DashboardHandler)
-    print(f"{LOG_PREFIX} Dashboard HTTP server running on port 8080")
+    print(f"{LOG_PREFIX} Dashboard HTTP server running on port 8081")
     httpd.serve_forever()
 
 

@@ -47,11 +47,15 @@ class Player(FirstPersonController):
 
     def update(self):
         # Nameplate
-        if getattr(self, 'gui', None) and getattr(self.gui, 'namePlate', None):
+        # "is not None", non solo il controllo di verita' implicito, per lo stesso motivo di
+        # apply_block_destroyed in main.py: bool(Entity) puo' sollevare TypeError su un Entity
+        # non ancora costruito o gia' distrutto.
+        if getattr(self, 'gui', None) is not None and getattr(self.gui, 'namePlate', None) is not None:
             self.gui.namePlate.world_position = self.world_position + Vec3(0, 1.5, 0)
 
-        # Logic
-        self.can_dash = self.grounded
+      
+        if self.grounded:
+            self.can_dash = True
         is_jumping = not self.grounded
         is_walking = held_keys['w'] or held_keys['a'] or held_keys['s'] or held_keys['d']
 
