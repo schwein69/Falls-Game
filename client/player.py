@@ -3,7 +3,42 @@ from ursina.prefabs.first_person_controller import FirstPersonController
 from inGameGui import InGameGui
 import random
 
-class Player(FirstPersonController):
+ANIMATION_FILES = {
+    "idle": "idle_",
+    "walking": "untitled_",
+    "running": "run_",
+    "jumping": "jump_",
+}
+ANIMATION_TEXTURE = "mini_material_baseColor"
+
+
+class AnimatedCharacterMixin:
+
+    def load_animations(self, frame_times=None):
+        self.idleAnimation = None
+        self.walkingAnimation = None
+        self.runningAnimation = None
+        self.jumpingAnimation = None
+        try:
+            kwargs = dict(fps=24, loop=True, autoplay=True, texture=ANIMATION_TEXTURE,
+                          parent=self, origin_y=-0.2)
+            if frame_times is not None:
+                kwargs["frame_times"] = frame_times
+            self.idleAnimation = FrameAnimation3d(ANIMATION_FILES["idle"], **kwargs)
+            self.walkingAnimation = FrameAnimation3d(ANIMATION_FILES["walking"], **kwargs)
+            self.runningAnimation = FrameAnimation3d(ANIMATION_FILES["running"], **kwargs)
+            self.jumpingAnimation = FrameAnimation3d(ANIMATION_FILES["jumping"], **kwargs)
+            self.switch_animation(self.idleAnimation)
+        except Exception as e:
+            print(f"Caricamento animazioni fallito: {e}")
+
+    def switch_animation(self, new_animation):
+        for anim in (self.idleAnimation, self.walkingAnimation, self.runningAnimation, self.jumpingAnimation):
+            if anim is not None:
+                anim.enabled = (anim == new_animation)
+
+
+class Player(FirstPersonController, AnimatedCharacterMixin):
     def __init__(self, position: Vec3, username: str):
         super().__init__(
             position=position,
@@ -16,7 +51,7 @@ class Player(FirstPersonController):
 
         # Random cursor color
         random_color = color.rgb(random.random(), random.random(), random.random())
-        if hasattr(self, 'cursor') and self.cursor:
+        if getattr(self, 'cursor', None) is not None:
             self.cursor.color = random_color
 
         # GUI Setup
@@ -31,42 +66,27 @@ class Player(FirstPersonController):
         # State
         self.death_message_shown = False
         self.can_dash = True
-        
-        self.load_animations()
-     
-    def load_animations(self):
-        try:
-            # Using the exact names you provided
-            self.idleAnimation = FrameAnimation3d("idle_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
-            self.walkingAnimation = FrameAnimation3d("untitled_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
-            self.runningAnimation = FrameAnimation3d("run_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
-            self.jumpingAnimation = FrameAnimation3d("jump_", fps=24, loop=True, autoplay=True, frame_times=50, texture="mini_material_baseColor", origin_y=-0.2)
-        except:
-            print("Animations failed to load")
-            self.idleAnimation = None
+
+        self.load_animations(frame_times=50)
 
     def update(self):
         # Nameplate
-        # "is not None", non solo il controllo di verita' implicito, per lo stesso motivo di
-        # apply_block_destroyed in main.py: bool(Entity) puo' sollevare TypeError su un Entity
-        # non ancora costruito o gia' distrutto.
         if getattr(self, 'gui', None) is not None and getattr(self.gui, 'namePlate', None) is not None:
             self.gui.namePlate.world_position = self.world_position + Vec3(0, 1.5, 0)
 
-      
         if self.grounded:
             self.can_dash = True
         is_jumping = not self.grounded
         is_walking = held_keys['w'] or held_keys['a'] or held_keys['s'] or held_keys['d']
 
         # Animation Switching
-        if is_jumping and self.jumpingAnimation:
+        if is_jumping and self.jumpingAnimation is not None:
             self.switch_animation(self.jumpingAnimation)
-        elif not is_walking and self.idleAnimation:
+        elif not is_walking and self.idleAnimation is not None:
             self.switch_animation(self.idleAnimation)
-        elif is_walking and self.speed > 5 and self.runningAnimation:
+        elif is_walking and self.speed > 5 and self.runningAnimation is not None:
             self.switch_animation(self.runningAnimation)
-        elif is_walking and self.speed <= 5 and self.walkingAnimation:
+        elif is_walking and self.speed <= 5 and self.walkingAnimation is not None:
             self.switch_animation(self.walkingAnimation)
 
         # Dash
@@ -78,6 +98,7 @@ class Player(FirstPersonController):
         super().update()
 
     def switch_animation(self, new_animation):
+        AnimatedCharacterMixin.switch_animation(self, new_animation)
         if self.model != new_animation:
             self.model = new_animation
 
@@ -87,61 +108,41 @@ class Player(FirstPersonController):
             Text(text="Game over!", origin=Vec2(0, 0), scale=3)
 
 
-# =========================================================
-# REMOTE PLAYER 
-# =========================================================
-class RemotePlayer(Entity):
+# REMOTE PLAYER
+class RemotePlayer(Entity, AnimatedCharacterMixin):
     def __init__(self, position: Vec3, username: str):
         super().__init__(
             position=position,
-            model=None,           
-            collider="capsule",      
+            model=None,
+            collider="capsule",
             scale=1
         )
         self.username = username
         self.name_tag = Text(text=username, parent=scene, y=2.5, scale=5, billboard=True, color=color.white)
-        
+
         self.prev_pos = position
-        
-        # Load animations (Same as before)
+
         self.load_animations()
-
-    def load_animations(self):
-        try:
-            # Note: Ensure texture names are correct
-            self.idleAnimation = FrameAnimation3d("idle_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
-            self.walkingAnimation = FrameAnimation3d("untitled_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
-            self.runningAnimation = FrameAnimation3d("run_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
-            self.jumpingAnimation = FrameAnimation3d("jump_", fps=24, loop=True, autoplay=True, texture="mini_material_baseColor", parent=self, origin_y=-0.2)
-            self.switch_animation(self.idleAnimation)
-        except:
-            print(f"Remote Animations failed to load")
-
-    def switch_animation(self, new_animation):
-        animations = [self.idleAnimation, self.walkingAnimation, self.runningAnimation, self.jumpingAnimation]
-        for anim in animations:
-            if anim:
-                anim.enabled = (anim == new_animation)
 
     def update(self):
         self.name_tag.world_position = self.world_position + Vec3(0, 1.5, 0)
 
         move_vec = self.position - self.prev_pos
         horizontal_speed = Vec3(move_vec.x, 0, move_vec.z).length()
-        
+
         if horizontal_speed > 0.001:
             self.look_at(self.position + Vec3(move_vec.x, 0, move_vec.z), axis='forward')
-            
             self.rotation_x = 0
             self.rotation_z = 0
+
         # Animation Logic
-        if self.position.y > 1.0 and abs(move_vec.y) > 0.01: 
-             self.switch_animation(self.jumpingAnimation)
+        if self.position.y > 1.0 and abs(move_vec.y) > 0.01:
+            self.switch_animation(self.jumpingAnimation)
         elif horizontal_speed > 0.1:
-             self.switch_animation(self.runningAnimation)
+            self.switch_animation(self.runningAnimation)
         elif horizontal_speed > 0.001:
-             self.switch_animation(self.walkingAnimation)
+            self.switch_animation(self.walkingAnimation)
         else:
-             self.switch_animation(self.idleAnimation)
+            self.switch_animation(self.idleAnimation)
 
         self.prev_pos = self.position

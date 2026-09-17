@@ -15,9 +15,7 @@ import network_p2p
 import network_online
 from game_authority import GameAuthority
 
-# --------------------------
 # GLOBAL GAME STATE
-# --------------------------
 app = Ursina()
 loading_screen = None
 player = None
@@ -39,6 +37,7 @@ network_manager: NetworkManager = None
 broadcaster: DiscoveryBroadcaster = None
 current_listener: DiscoveryListener = None
 
+
 game_authority: GameAuthority = None
 
 current_floor_seed = None
@@ -46,9 +45,7 @@ migrating = False
 
 player_died_reported = False
 
-# --------------------------
 # UI elements
-# --------------------------
 def clear_all_ui_elements():
     for e in camera.ui.children:
         destroy(e)
@@ -64,9 +61,7 @@ def display_error_message_screen(message, on_close_callback):
                  parent=camera.ui, on_click=on_close_callback)
     guiElements.extend([msg, btn])
 
-# --------------------------
 # RPC HANDLERS
-# --------------------------
 # This is called when we receive a spawn RPC for another player. We create a RemotePlayer instance for them and store it in other_players dict.
 def rpc_spawn_player(pid, x, y, z, status="alive", matchId=None):
     global other_players, connected_ids
@@ -126,10 +121,6 @@ def rpc_block_destroyed(block_id, pid):
 def apply_block_destroyed(block_id, pid):
     """Distrugge visivamente il blocco corrispondente e applica l'eventuale effetto
     (velocita'/super salto) SOLO se il giocatore che lo ha attivato siamo noi."""
-    # NOTA: "is None" e non "not floors"/"not cube" — con gli Entity di Ursina, il controllo di
-    # verita' implicito (bool(entity)) delega a Panda3D e solleva TypeError se l'oggetto C++
-    # sottostante non e' ancora costruito o e' gia' stato distrutto, invece di dare semplicemente
-    # False. Va sempre confrontato esplicitamente con None.
     if floors is None:
         return
     cube = floors.blocks_by_id.get(block_id)
@@ -174,21 +165,11 @@ def apply_game_won(winner_pid):
     gioco (vedi update()), cosi' non serve un flag separato."""
     global game_over, player
     if game_over:
-        return  # vittoria gia' mostrata, non farlo due volte
+        return  
     game_over = True
-    # BUG FIX: durante il gioco il FirstPersonController blocca il cursore del mouse (per
-    # guardarsi intorno) — senza sbloccarlo qui, il cursore resta invisibile/vincolato al centro
-    # dello schermo e non si riesce a cliccare il bottone "Torna al menu" qui sotto.
     mouse.locked = False
     mouse.visible = True
 
-    # BUG FIX: prima clear_all_ui_elements() veniva chiamata QUI, prima di distruggere il
-    # player. Il cursore del FirstPersonController pero' e' figlio di camera.ui: quella
-    # chiamata lo distruggeva "di nascosto" senza che il player (che pensa di possederlo ancora)
-    # ne sapesse nulla. Al click su "Torna al menu", resetFloor() prova a distruggere il player,
-    # il cui on_destroy() tenta di disabilitare un cursore GIA' distrutto -> crash Panda3D
-    # ("NodePath gia' singleton/vuoto"). Distruggiamo il player PRIMA (che ripulisce anche il
-    # proprio cursore/HUD nel modo corretto), poi puliamo il resto della UI.
     if player is not None:
         destroy(player)
         player = None
@@ -232,9 +213,8 @@ def rpc_start_game(seed=None):
     lobby_open = False
     current_floor_seed = seed
     loadLevel(seed)
-    # After level loads, spawn everyone who was waiting in the lobby
-    for pid in connected_ids:
-        rpc_spawn_player(pid, 0, 5, 0)
+    # NOTA: lo "spawn" di chi era gia' in lobby avviene in gameStart() (0.1s dopo), non qui —
+    # a questo punto level_loaded e' ancora False, quindi rpc_spawn_player non farebbe nulla.
 
 
 # This is called to pause the game when a player disconnects and resume when they rejoin. The host can also call this to force pause/resume for testing.
@@ -286,16 +266,12 @@ def request_block_step(block_id):
     else:
         network_manager.send_rpc("block_step", network_manager.player_id, block_id)
 
-# --------------------------
 # GAME LOADING
-# --------------------------
 def loadLevel(floor_seed=None):
     global player, floors, sky, level_loaded, game_over, player_died_reported
     clear_all_ui_elements()
     player_died_reported = False
 
-    # Seed condiviso: garantisce che TUTTI i client generino esattamente lo stesso layout di
-    # blocchi (tipo e posizione), invece di tirare a caso ciascuno per conto proprio.
     apply_floor_seed(floor_seed)
     floors = Floor()
     sky = Entity(
@@ -306,7 +282,17 @@ def loadLevel(floor_seed=None):
     )
 
     start_pos = get_random_position()
+
+    top_floor_y = (FLOOR_COUNT - 1) * FLOOR_HEIGHT
+    for cube in floors.floor_cubes:
+        if abs(cube.x - start_pos.x) < 0.01 and abs(cube.z - start_pos.z) < 0.01 and abs(cube.y - top_floor_y) < 0.01:
+            cube.collider = "box"
+            cube.collider_added = True
+            break
+
     player = Player(start_pos, f"Player {network_manager.player_id}")
+
+    player.gravity = 0
     camera.z = -5
     game_over = False
 
@@ -316,6 +302,10 @@ def gameStart():
     global level_loaded
     level_loaded = True
     player.gravity = 1
+
+    for pid in connected_ids:
+        if pid not in other_players and pid != network_manager.player_id:
+            rpc_spawn_player(pid, 0, SPAWN_HEIGHT, 0)
 
     # Notify others of our spawn
     if network_manager:
@@ -338,12 +328,7 @@ def resetFloor():
     sky = None
     level_loaded = False
     game_over = False
-
-    # Chiudiamo del tutto la sessione di rete. PRIMA questa funzione lasciava network_manager,
-    # game_authority e broadcaster vivi in background anche tornando al menu: un "Host Game"
-    # successivo creava una SECONDA sessione mentre quella vecchia (thread di ricezione UDP,
-    # tick delle posizioni, heartbeat) restava attiva inutilmente. Stessa pulizia gia' fatta da
-    # leave_lobby() quando si esce dalla lobby prima ancora che la partita inizi.
+    
     if network_manager is not None:
         network_manager.stop()
         network_manager = None
@@ -357,12 +342,9 @@ def resetFloor():
 
     invoke(show_main_menu_screen, delay=1)
 
-# --------------------------
 # NETWORK SESSION CONTROLS
-# --------------------------
-# ==========================================================
-# SESSIONE P2P (rete locale, nessun server dedicato)
-# ==========================================================
+
+# SESSIONE P2P
 def start_local_host_session():
     global network_manager, broadcaster, game_authority
     clear_all_ui_elements()
@@ -373,9 +355,7 @@ def start_local_host_session():
 
     invoke(show_lobby_screen, delay=0.5)
 
-# ==========================================================
 # SESSIONE ONLINE (matchmaking + server dedicato)
-# ==========================================================
 def start_online_client_session():
     """Avvia la modalita' Online: ci connettiamo al matchmaking server (config.MATCHMAKING_HOSTNAME)
     e attendiamo di essere abbinati. Il matchmaking spawna una game instance dedicata
@@ -391,8 +371,6 @@ def start_online_client_session():
                        on_click=lambda: cancel_online_session())
     guiElements.extend([status_text, back_btn])
 
-    # Tutta l'orchestrazione specifica dell'online (handshake TCP col matchmaking) vive in
-    # network_online.py; qui leggiamo solo lo stato via network_manager.matchmaking_status.
     network_manager = network_online.start_online_session()
 
     invoke(poll_matchmaking_status, network_manager, status_text, delay=0.5)
@@ -484,9 +462,6 @@ def back_to_scan_host_menu(listener):
 
 def connect_to_p2p_host(ip_or_getter, listener):
     global network_manager
-    # ip_or_getter puo' essere una stringa (host scoperto via LAN) o una funzione senza argomenti
-    # che restituisce il valore CORRENTE del campo IP manuale (valutata solo al click, cosi'
-    # prendiamo quello che l'utente ha digitato e non il valore iniziale del campo).
     ip = ip_or_getter() if callable(ip_or_getter) else ip_or_getter
     if not ip:
         return
@@ -499,9 +474,7 @@ def connect_to_p2p_host(ip_or_getter, listener):
     except Exception:
         display_error_message_screen("Connection failed.", lambda: show_local_mode_menu())
 
-# --------------------------
 # LOBBY SYSTEM
-# --------------------------
 def show_lobby_screen():
     global lobby_open
     lobby_open = True
@@ -517,10 +490,6 @@ def show_lobby_screen():
         title = Text("Lobby", scale=1.2, y=0.4, parent=camera.ui)
         player_labels.append(title)
 
-        # Elenco giocatori: usiamo connected_ids, che si popola per TUTTI (host e client) man
-        # mano che qualcuno entra, gia' durante la lobby — a differenza di other_players, che
-        # resta vuoto finche' la partita non parte davvero (si popola solo con level_loaded=True),
-        # quindi prima un client normale vedeva sempre e solo se stesso nel conteggio.
         all_ids = sorted({network_manager.player_id} | connected_ids)
         for i, pid in enumerate(all_ids):
             is_me = pid == network_manager.player_id
@@ -585,9 +554,6 @@ def handle_host_migration():
 
     old_nm = network_manager
     my_id = old_nm.player_id
-    # Chi e' ancora presente, secondo quello che sapevamo PRIMA che l'host sparisse: noi stessi
-    # piu' chiunque avessimo gia' come RemotePlayer. E' un criterio deterministico: ogni
-    # sopravvissuto calcola la stessa lista e lo stesso vincitore, senza doversi coordinare.
     survivor_ids = set(other_players.keys()) | {my_id}
     new_host_id = min(survivor_ids)
 
@@ -595,9 +561,6 @@ def handle_host_migration():
                   parent=camera.ui, tag='migration_text')
 
     if new_host_id == my_id:
-        # Tocca a noi diventare il nuovo host. Ricostruiamo lo stato dai dati che avevamo
-        # gia' visto (blocchi gia' spariti sul nostro pavimento, ultima posizione nota di
-        # ognuno) invece di ripartire da zero.
         destroyed_ids = [b.block_id for b in (floors.floor_cubes if floors is not None else []) if b.has_activated]
         positions = {pid: [rp.x, rp.y, rp.z] for pid, rp in other_players.items()}
         if player is not None:
@@ -608,8 +571,6 @@ def handle_host_migration():
         print(f"[Game] Siamo il nuovo host (player {my_id}).")
         finish_migration(status)
     else:
-        # Aspettiamo che il nuovo host (un altro sopravvissuto) inizi a farsi vedere sulla LAN,
-        # e ci ricolleghiamo a lui chiedendo di riavere lo stesso id di prima.
         listener = network_p2p.start_host_discovery_scan()
         invoke(try_find_new_host, old_nm, my_id, listener, status, 10, delay=1.0)
 
@@ -636,9 +597,7 @@ def finish_migration(status):
     destroy(status)
     migrating = False
 
-# --------------------------
 # MAIN MENU
-# --------------------------
 def show_main_menu_screen():
     clear_all_ui_elements()
     Text('Falls Game', scale=2, origin=(0, 0), position=(0, 0.3), parent=camera.ui)
@@ -665,11 +624,6 @@ def update():
     if not level_loaded or player is None or game_over or game_paused:
         return
 
-    # Physics and Game Logic: aggiorniamo i collider e rileviamo se siamo sopra un blocco non
-    # ancora attivato. NOTA: non distruggiamo piu' il blocco qui direttamente (prima questo era
-    # codice morto: "player.intersects()" veniva chiamato ma il risultato era commentato). Ora
-    # mandiamo una RICHIESTA all'autorita' di gioco (vedi request_block_step), che decide se
-    # accettarla e lo comunica a tutti — cosi' tutti i giocatori vedono lo stesso esito.
     for entity in scene.entities:
         if isinstance(entity, FloorCube):
             entity.updateColliders(player)
@@ -679,21 +633,11 @@ def update():
                     entity.step_requested = True
                     request_block_step(entity.block_id)
 
-    # Caduti sotto la mappa: prima qui finiva subito la partita per TUTTI (game_over locale +
-    # ritorno al menu dopo 2s), a prescindere da quanti altri giocatori fossero ancora vivi. Ora
-    # segnaliamo solo la nostra caduta all'autorita' di gioco, che decide se la partita e' finita
-    # (siamo rimasti l'unico vivo? vince l'altro) oppure se deve continuare finche' non resta un
-    # solo superstite.
     if not player_died_reported and player.world_position.y < -20:
         player_died_reported = True
         player.gameOver()
         request_player_died()
 
-    # BUG FIX: se siamo l'host, request_player_died() sopra puo' decretare una vittoria in modo
-    # SINCRONO (rpc_player_died -> apply_game_won), che distrugge il player e lo mette a None
-    # nello stesso istante — ma il controllo "esci se non c'e' il player" in cima a questa
-    # funzione e' gia' stato superato per QUESTO frame. Senza ricontrollare qui, le righe
-    # sotto proverebbero ad accedere a player.x su un player ormai None -> crash.
     if game_over or player is None:
         return
 
@@ -702,8 +646,6 @@ def update():
         network_manager.send_rpc("update_pos", network_manager.player_id,
                                  player.x, player.y, player.z)
         if network_manager.is_host and game_authority is not None:
-            # L'host non riceve mai i propri pacchetti via rete (send_raw non fa loopback):
-            # alimentiamo l'autorita' direttamente con la nostra posizione.
             game_authority.handle_update_pos(network_manager.player_id, player.x, player.y, player.z)
 
 def input(key):
