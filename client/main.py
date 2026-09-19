@@ -533,9 +533,6 @@ def leave_lobby():
 # --------------------------
 # MIGRAZIONE DELL'HOST (solo P2P)
 # --------------------------
-# Se l'host P2P sparisce, i client sopravvissuti eleggono in autonomia un nuovo host (l'id piu'
-# basso tra chi e' rimasto: e' un criterio deterministico che tutti calcolano allo stesso modo,
-# senza bisogno di negoziare) e la partita continua invece di finire di colpo.
 def check_host_migration():
     global migrating
     if migrating or not network_manager:
@@ -647,6 +644,7 @@ def update():
                                  player.x, player.y, player.z)
         if network_manager.is_host and game_authority is not None:
             game_authority.handle_update_pos(network_manager.player_id, player.x, player.y, player.z)
+            rpc_state_snapshot(game_authority.snapshot_payload())
 
 def input(key):
     if key == 'escape' and level_loaded:
