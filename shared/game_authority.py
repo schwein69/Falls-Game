@@ -10,32 +10,29 @@ class GameAuthority:
         self.dead_players = set()       # pid gia' caduti/eliminati
         self.game_won = False           # evita di dichiarare due volte una vittoria
 
-    # ------------------------------------------------------------------
     # Vittoria: vince l'ultimo giocatore rimasto vivo
-    # ------------------------------------------------------------------
     def handle_player_died(self, pid):
-        """Un giocatore e' caduto/eliminato. Ritorna il pid del vincitore se questo lo lascia
-        come unico superstite, altrimenti None (la partita continua)."""
+        """Un giocatore e' caduto/eliminato. Ritorna (partita_finita, vincitore_o_None) — vedi
+        _check_win per i dettagli."""
         self.known_players.add(pid)
         self.dead_players.add(pid)
+        self.player_positions.pop(pid, None)
         return self._check_win()
 
     def _check_win(self):
         if self.game_won:
-            return None  # vittoria gia' dichiarata, non farlo due volte
+            return False, None
         alive = self.known_players - self.dead_players
         if len(self.known_players) > 1 and len(alive) == 1:
             self.game_won = True
-            return next(iter(alive))
-        return None
+            return True, next(iter(alive))
+        if len(alive) == 0 and len(self.known_players) > 0:
+            self.game_won = True
+            return True, None
+        return False, None
 
-    # ------------------------------------------------------------------
-    # Pavimento
-    # ------------------------------------------------------------------
+    # Floor
     def handle_block_step(self, pid, block_id):
-        """Un client segnala di essere passato sul blocco block_id. Ritorna il payload da
-        trasmettere a tutti se e' la prima volta che viene distrutto, altrimenti None
-        (richiesta ignorata: qualcun altro lo ha gia' consumato, o l'id non e' valido)."""
         if block_id is None:
             return None
         if block_id in self.destroyed_blocks:
