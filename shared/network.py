@@ -3,7 +3,7 @@ import threading
 import queue
 import json
 import time
-from config import P2P_PORT, MAX_PLAYERS, SPAWN_HEIGHT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT
+from config import P2P_PORT, MAX_PLAYERS, SPAWN_HEIGHT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, REJOIN_TIMER
 
 class NetworkManager:
     
@@ -20,6 +20,14 @@ class NetworkManager:
         # Client connessi. (ip, porta) -> player_id
         self.clients = {}
 
+        # SOLO lato host: rilevamento di client silenziosi (calo di rete accidentale, non
+        # un'uscita volontaria — quella e' gestita separatamente e in modo immediato tramite
+        # DISCONNECT, vedi handle_internal_messages). (ip,porta) -> timestamp ultimo pacchetto.
+        self.client_last_seen = {}
+        # (ip,porta) -> (player_id, timestamp_in_pausa): client sospettati disconnessi, in
+        # attesa che si facciano risentire entro REJOIN_TIMER secondi prima di rimuoverli.
+        self.disconnected_clients = {}
+
         self.host_is_player = False
 
         self.expected_players = {}
@@ -34,7 +42,7 @@ class NetworkManager:
         self.pending_migration_ids = set()
 
         self.msg_queue = queue.Queue()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self._tick_thread = None
         self._heartbeat_thread = None
 
@@ -86,9 +94,7 @@ class NetworkManager:
         threading.Thread(target=self.receive_loop, daemon=True).start()
         print(f"[Network] Host/server avviato sulla porta {bind_port} (player_id={player_id})")
 
-    # ================================
     # INVIO DATI
-    # ================================
     def send_rpc(self, method_name, *args):
         """Da usare per mandare un RPC verso l'host/server (se siamo client) oppure verso tutti
         i client registrati (se siamo host/server) con il NOSTRO id come mittente."""
@@ -136,7 +142,7 @@ class NetworkManager:
     def broadcast_rpc(self, method_name, *args, exclude_pid=None):
         """Costruisce un NUOVO RPC (con sender_id = noi, l'host/server) e lo manda a tutti i
         client, opzionalmente escludendo un player_id. Usato dall'autorita' di gioco per
-        comunicare eventi che ha appena deciso lei stessa (es. block_destroyed, state_snapshot)."""
+        comunicare eventi (es. block_destroyed, state_snapshot)."""
         if not self.sock:
             return
         data = {"method": method_name, "args": args, "sender_id": self.player_id}
@@ -170,8 +176,8 @@ class NetworkManager:
         """SOLO lato host: manda un piccolo segnale di vita a tutti i client a intervalli
         regolari, cosi' possono accorgersi se l'host sparisce (vedi host_alive) anche quando
         non c'e' ancora nessuno stato di gioco da trasmettere (es. in lobby, prima che la
-        partita inizi — start_broadcast_tick da solo non manderebbe nulla in quel momento,
-        perche' un payload vuoto non viene trasmesso)."""
+        partita inizi). Sullo STESSO intervallo, controlla anche se qualche CLIENT e' rimasto
+        silenzioso troppo a lungo — vedi check_client_liveness."""
         if self._heartbeat_thread is not None:
             return
 
@@ -182,9 +188,42 @@ class NetworkManager:
                     break
                 if self.is_host:
                     self.broadcast_rpc("host_heartbeat")
+                    self.check_client_liveness()
 
         self._heartbeat_thread = threading.Thread(target=_loop, daemon=True)
         self._heartbeat_thread.start()
+
+    def check_client_liveness(self, timeout=HEARTBEAT_TIMEOUT, grace_period=REJOIN_TIMER):
+        """SOLO lato host: rileva un client rimasto silenzioso (nessun pacchetto ricevuto da
+        lui, non un'uscita volontaria — quella arriva come DISCONNECT esplicito e viene gestita
+        subito, in modo immediato e separato). Se il silenzio supera 'timeout' secondi, mette
+        in pausa la partita per tutti e gli da' 'grace_period' secondi per farsi risentire
+        (basta che riprenda a mandare pacchetti dalla STESSA porta — non serve nessun
+        protocollo di rientro esplicito, un blip di rete si risolve da solo, vedi
+        on_receive_data). Se il tempo scade senza notizie, lo rimuove definitivamente."""
+        now = time.time()
+        with self.lock:
+            for addr, pid in list(self.clients.items()):
+                if addr in self.disconnected_clients:
+                    continue  # gia' segnalato, aspettiamo che rientri o scada la grazia
+                last_seen = self.client_last_seen.get(addr, now)
+                if now - last_seen > timeout:
+                    print(f"[Host] Player {pid} sembra disconnesso (silenzio da {now - last_seen:.1f}s). "
+                          f"Metto in pausa la partita, {grace_period}s per rientrare...")
+                    self.disconnected_clients[addr] = (pid, now)
+                    self.broadcast_rpc("game_pause", True, pid)
+
+            for addr in list(self.disconnected_clients.keys()):
+                pid, disconnected_at = self.disconnected_clients[addr]
+                if now - disconnected_at > grace_period:
+                    print(f"[Host] Player {pid} non e' rientrato in tempo. Rimosso dalla partita.")
+                    del self.disconnected_clients[addr]
+                    self.clients.pop(addr, None)
+                    self.client_last_seen.pop(addr, None)
+                    self.broadcast_rpc("game_pause", False, pid)
+                    leave_payload = {"method": "player_left", "args": [pid], "sender_id": self.player_id}
+                    self.msg_queue.put(leave_payload)
+                    self.send_raw(json.dumps(leave_payload))
 
     def host_alive(self, timeout=HEARTBEAT_TIMEOUT):
         """SOLO lato client: True se abbiamo sentito l'host negli ultimi 'timeout' secondi.
@@ -229,6 +268,18 @@ class NetworkManager:
                     print(f"[Host] Pacchetto rifiutato da {addr}: dichiara pid={claimed_pid}, "
                           f"registrato come pid={real_pid}")
                     return
+
+                # Qualunque pacchetto valido da un client registrato conta come segnale di vita
+                # — non serve un heartbeat dedicato, update_pos arriva gia' continuamente.
+                self.client_last_seen[addr] = time.time()
+                if addr in self.disconnected_clients:
+                    # Era stato segnalato come silenzioso, ma ha ripreso a mandare pacchetti
+                    # dalla STESSA porta prima che scadesse la grazia: rientro automatico, non
+                    # serve nessun protocollo esplicito, un calo di rete si e' solo risolto da
+                    # solo.
+                    print(f"[Host] Player {real_pid} e' rientrato.")
+                    del self.disconnected_clients[addr]
+                    self.broadcast_rpc("game_pause", False, real_pid)
 
                 # Relay automatico SOLO per i metodi "semplici". update_pos e block_step
                 # vengono gestiti esplicitamente dal gestore RPC lato host/server (vedi
@@ -299,6 +350,8 @@ class NetworkManager:
             elif msg == "DISCONNECT":
                 if addr in self.clients:
                     pid = self.clients.pop(addr)
+                    self.client_last_seen.pop(addr, None)
+                    self.disconnected_clients.pop(addr, None)
                     print(f"[Host] Player {pid} ha lasciato la partita.")
                     leave_payload = {"method": "player_left", "args": [pid], "sender_id": 0}
                     self.msg_queue.put(leave_payload)
