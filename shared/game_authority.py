@@ -39,7 +39,7 @@ class GameAuthority:
             return True, None
         return False, None
 
-    # Floor
+    # Pavimento
     def handle_block_step(self, pid, block_id):
         """Un client segnala di essere passato sul blocco block_id. Ritorna il payload da
         trasmettere a tutti se e' la prima volta che viene distrutto, altrimenti None
@@ -60,7 +60,7 @@ class GameAuthority:
         self.known_players.add(pid)
         self.player_positions[pid] = (x, y, z)
 
-    def handle_player_left_match(self, pid):
+    def remove_player(self, pid):
         """Un giocatore si disconnette/lascia la partita. Ritorna (partita_finita,
         vincitore_o_None) — non e' contato come 'morto', semplicemente non e' piu' tra quelli
         in gara."""
@@ -68,8 +68,36 @@ class GameAuthority:
         self.left_players.add(pid)
         self.player_positions.pop(pid, None)
         return self._check_win()
-    
 
     def snapshot_payload(self):
         """Stato consolidato di TUTTI i giocatori noti, da trasmettere a intervalli fissi."""
         return {pid: list(pos) for pid, pos in self.player_positions.items()}
+
+    # Replica primary -> backup: serializzazione dello stato completo
+    def to_dict(self):
+        """Tutto lo stato in una forma serializzabile in JSON, per replicarlo dal primary al
+        backup passivo. Gli insiemi (set) diventano liste — JSON non ha un tipo 'set'."""
+        return {
+            "floor_seed": self.floor_seed,
+            "destroyed_blocks": list(self.destroyed_blocks),
+            "player_positions": {str(pid): list(pos) for pid, pos in self.player_positions.items()},
+            "known_players": list(self.known_players),
+            "dead_players": list(self.dead_players),
+            "left_players": list(self.left_players),
+            "game_won": self.game_won,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        """Ricostruisce un'autorita' da uno stato replicato (vedi to_dict). Usato dal backup
+        quando viene promosso a primary, per ripartire dall'ULTIMO stato ricevuto invece che da
+        zero."""
+        auth = cls()
+        auth.floor_seed = data["floor_seed"]
+        auth.destroyed_blocks = set(data["destroyed_blocks"])
+        auth.player_positions = {int(pid): tuple(pos) for pid, pos in data["player_positions"].items()}
+        auth.known_players = set(data["known_players"])
+        auth.dead_players = set(data["dead_players"])
+        auth.left_players = set(data["left_players"])
+        auth.game_won = data["game_won"]
+        return auth

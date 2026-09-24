@@ -1,5 +1,13 @@
 {
   "pending": [],
-  "active_games": {},
-  "timestamp": 1788119630.2100427
+  "active_games": {
+    "10000": {
+      "players": [
+        168360,
+        454241
+      ],
+      "start_ts": 1790198004.907338
+    }
+  },
+  "timestamp": 1790198004.907338
 }

@@ -118,7 +118,7 @@ class RemotePlayer(Entity, AnimatedCharacterMixin):
             scale=1
         )
         self.username = username
-        self.name_tag = Text(text=username, parent=scene, y=2.5, scale=5, billboard=True, color=color.white)
+        self.name_tag = Text(text=username, parent=self, y=2.5, scale=5, billboard=True, color=color.white)
 
         self.prev_pos = position
 

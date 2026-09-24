@@ -42,9 +42,17 @@ class NetworkManager:
         self.pending_migration_ids = set()
 
         self.msg_queue = queue.Queue()
+        # RLock (rientrante), non Lock semplice: check_client_liveness tiene il lock mentre
+        # chiama broadcast_rpc, che a sua volta lo riprende — con un Lock normale (non
+        # rientrante) questo e' un deadlock immediato (lo stesso thread si blocca aspettando
+        # se stesso). Con RLock lo stesso thread puo' riacquisirlo senza problemi.
         self.lock = threading.RLock()
         self._tick_thread = None
         self._heartbeat_thread = None
+
+        # SOLO modalita' Online: connessione TCP persistente col proxy di partita (vedi
+        # network_online.py/_connect_via_proxy). None se stiamo giocando in P2P locale.
+        self.proxy_sock = None
 
     def prepare_local_socket(self):
         """Crea (se non esiste gia') il socket UDP locale e ne restituisce la porta assegnata.
@@ -94,7 +102,9 @@ class NetworkManager:
         threading.Thread(target=self.receive_loop, daemon=True).start()
         print(f"[Network] Host/server avviato sulla porta {bind_port} (player_id={player_id})")
 
+    # ================================
     # INVIO DATI
+    # ================================
     def send_rpc(self, method_name, *args):
         """Da usare per mandare un RPC verso l'host/server (se siamo client) oppure verso tutti
         i client registrati (se siamo host/server) con il NOSTRO id come mittente."""
@@ -142,7 +152,7 @@ class NetworkManager:
     def broadcast_rpc(self, method_name, *args, exclude_pid=None):
         """Costruisce un NUOVO RPC (con sender_id = noi, l'host/server) e lo manda a tutti i
         client, opzionalmente escludendo un player_id. Usato dall'autorita' di gioco per
-        comunicare eventi (es. block_destroyed, state_snapshot)."""
+        comunicare eventi che ha appena deciso lei stessa (es. block_destroyed, state_snapshot)."""
         if not self.sock:
             return
         data = {"method": method_name, "args": args, "sender_id": self.player_id}
@@ -240,6 +250,10 @@ class NetworkManager:
             try:
                 data, addr = self.sock.recvfrom(8192)
                 self.on_receive_data(data, addr)
+            except (ConnectionResetError, OSError) as e:
+                if self.running:
+                    print(f"[Network] Pacchetto UDP scartato (errore transitorio innocuo): {e}")
+                continue
             except Exception as e:
                 if self.running:
                     print(f"Errore nel receive loop: {e}")
@@ -369,6 +383,12 @@ class NetworkManager:
 
     def stop(self):
         self.running = False
+        if self.proxy_sock:
+            try:
+                self.proxy_sock.close()
+            except Exception:
+                pass
+            self.proxy_sock = None
         if self.sock:
             try:
                 if not self.is_host and self.host_ip:

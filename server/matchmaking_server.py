@@ -1,3 +1,11 @@
+"""
+Matchmaking server with embedded plain-text HTTP dashboard on port 8081.
+
+- TCP matchmaking server accepts clients, groups players into games.
+- Starts game instances on new ports.
+- Dashboard available at http://<host>:8081/ showing queue and active games.
+"""
+
 import socket
 import threading
 import subprocess
@@ -16,7 +24,7 @@ status_file = os.path.join(os.path.dirname(__file__), "status.json")
 pending_clients = []  # list of (player_id, client_ip, udp_port, tcp_conn)
 active_games = {}     # port -> {players: [...], start_ts: ...}
 next_game_port = GAME_INSTANCE_BASE_PORT
-port_lock = threading.Lock() 
+port_lock = threading.Lock()  # FIX: c'era una "o" di troppo alla fine di questa riga
 
 
 def write_status():
@@ -31,6 +39,25 @@ def write_status():
             json.dump(data, f, indent=2)
     except Exception as e:
         print(f"{LOG_PREFIX} Failed writing status: {e}")
+
+
+def _wait_for_proxy_ready(tcp_port, timeout=5.0):
+    """Prova a connettersi brevemente alla porta TCP del proxy appena lanciato, per verificare
+    che sia davvero pronto ad accettare client prima di notificarli. Se non ce la fa entro
+    'timeout' secondi, va avanti comunque (i client hanno il loro ritentativo come rete di
+    sicurezza, vedi network_online._connect_via_proxy)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                s.connect(("127.0.0.1", tcp_port))
+            return True
+        except Exception:
+            time.sleep(0.1)
+    print(f"{LOG_PREFIX} Attenzione: il proxy sulla porta {tcp_port} non risulta pronto dopo "
+          f"{timeout}s, procedo comunque.")
+    return False
 
 
 def handle_client(conn, addr):
@@ -51,16 +78,31 @@ def handle_client(conn, addr):
                 group = pending_clients[:MAX_PLAYERS]
                 del pending_clients[:MAX_PLAYERS]
 
-                game_port = next_game_port
-                next_game_port += 1
+                # Ogni partita ora si prende un BLOCCO di 10 porte, non piu' una sola: il proxy
+                # ha bisogno di una porta TCP per i client, PIU' quattro porte UDP/TCP interne
+                # per la coppia primary/backup (vedi server/proxy.py). Il margine (10 invece di
+                # 4) lascia spazio a future estensioni senza dover ritoccare questa logica.
+                proxy_tcp_port = next_game_port
+                udp_base_port = next_game_port + 1
+                next_game_port += 10
                 players_info = [(pid, ip, udp) for (pid, ip, udp, _) in group]
                 players_json = json.dumps(players_info)
 
-                print(f"{LOG_PREFIX} Spawning game instance on port {game_port} for players: {[p[0] for p in players_info]}")
-                game_instance_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_instance.py")
-                subprocess.Popen([sys.executable, game_instance_path, str(game_port), players_json])
+                print(f"{LOG_PREFIX} Avvio il proxy (porta TCP {proxy_tcp_port}, blocco UDP da "
+                      f"{udp_base_port}) per i giocatori: {[p[0] for p in players_info]}")
+                proxy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy.py")
+                subprocess.Popen([sys.executable, proxy_path,
+                                   str(proxy_tcp_port), players_json, str(udp_base_port)])
 
-                active_games[game_port] = {
+                # Il proxy viene avviato in modo asincrono (subprocess.Popen ritorna subito, ben
+                # prima che il proxy abbia finito di avviarsi e messo in ascolto la sua porta
+                # TCP). Aspettiamo brevemente che sia davvero pronto prima di notificare i
+                # client — riduce il rischio che qualcuno ci provi nella finestra sbagliata (i
+                # client hanno comunque un loro ritentativo lato client, questa e' solo una
+                # difesa in piu', non l'unica).
+                _wait_for_proxy_ready(proxy_tcp_port)
+
+                active_games[proxy_tcp_port] = {
                     "players": [p[0] for p in players_info],
                     "start_ts": time.time(),
                 }
@@ -68,7 +110,10 @@ def handle_client(conn, addr):
 
                 for (pid, ip, udp, c) in group:
                     try:
-                        msg = f"GAME:{MATCHMAKING_HOSTNAME}:{game_port}"
+                        # Il formato del messaggio non cambia (host:porta) — cambia solo cosa il
+                        # client ci fa: ora e' la porta TCP del PROXY, non piu' la porta UDP del
+                        # server di gioco. Vedi network_online.py per l'handshake col proxy.
+                        msg = f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_tcp_port}"
                         c.sendall(msg.encode())
                         c.close()
                     except Exception as e:
@@ -96,6 +141,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self.send_response(200)
+            # FIX: text/html invece di text/plain, altrimenti il browser non interpreta il tag
+            # <meta http-equiv="refresh"> qui sotto e lo mostra come testo invece di eseguirlo.
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
@@ -109,6 +156,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             pending = status.get("pending", [])
             active_games_data = status.get("active_games", {})
+            timestamp = status.get("timestamp", 0)
+            timestr = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
             lines = []
             lines.append(f"Matchmaking Queue: {len(pending)} player(s)")
@@ -120,10 +169,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             lines.append(f"Active Games: {len(active_games_data)}")
             if active_games_data:
                 for port, info in active_games_data.items():
-                    player_list = ", ".join(info.get("players", []))
+                    player_list = ", ".join(str(p) for p in info.get("players", []))
                     lines.append(f" - Port {port}: {player_list}")
             lines.append("")
+            lines.append(f"Last update: {timestr}")
+            lines.append("Page refreshes every 5 seconds.")
 
+            # FIX: prima veniva scritto solo il testo grezzo (nessun refresh vero, solo la
+            # scritta che lo diceva). Ora avvolgiamo lo stesso testo in una paginetta HTML con
+            # <meta http-equiv="refresh" content="5">, che fa ricaricare la pagina da sola.
             html_page = (
                 "<html><head><meta http-equiv=\"refresh\" content=\"5\"></head>"
                 "<body><pre>" + "\n".join(lines) + "</pre></body></html>"
