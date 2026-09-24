@@ -55,7 +55,7 @@ class GameView:
         def refresh_host_buttons():
             if not listener.running:
                 if not host_buttons or not isinstance(host_buttons[-1], Text):
-                    msg = Text("Ricerca automatica non disponibile su questa macchina.",
+                    msg = Text("",
                                y=0.15, scale=0.7, origin=(0, 0), parent=camera.ui)
                     host_buttons.append(msg)
                 return

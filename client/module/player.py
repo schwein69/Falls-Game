@@ -1,6 +1,6 @@
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
-from inGameGui import InGameGui
+from inGameUi import InGameGui
 import random
 
 ANIMATION_FILES = {

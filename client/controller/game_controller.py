@@ -33,9 +33,7 @@ class GameController:
             "game_pause": self.rpc_game_pause,
         }
 
-    # ==================================================================
     # RPC: giocatori, spawn, posizione
-    # ==================================================================
     def rpc_spawn_player(self, pid, x, y, z, status="alive", matchId=None):
         """Ricevuto quando un altro giocatore si unisce/spawna: creiamo la sua RemotePlayer."""
         m = self.model
@@ -72,9 +70,7 @@ class GameController:
             elif m.level_loaded:
                 self.rpc_spawn_player(pid, *pos)
 
-    # ==================================================================
-    # RPC: pavimento
-    # ==================================================================
+    # RPC: floor
     def rpc_block_step(self, pid, block_id):
         """SOLO l'host P2P valida questa richiesta. Un client normale non dovrebbe mai
         riceverlo, ma per sicurezza controlliamo comunque prima di agire."""
@@ -84,7 +80,7 @@ class GameController:
             return
         result = m.game_authority.handle_block_step(pid, block_id)
         if result is None:
-            return  # gia' distrutto da qualcun altro: richiesta ignorata (idempotenza)
+            return  
         self.apply_block_destroyed(result["block_id"], result["pid"])
         nm.broadcast_rpc("block_destroyed", result["block_id"], result["pid"])
 
@@ -116,9 +112,7 @@ class GameController:
                     cube.force_destroy()
         self.rpc_state_snapshot(positions)
 
-    # ==================================================================
     # RPC: vita/morte, vittoria
-    # ==================================================================
     def request_player_died(self):
         """Il giocatore locale e' caduto/eliminato: lo segnaliamo all'autorita' di gioco."""
         m = self.model
@@ -137,8 +131,6 @@ class GameController:
         if not (nm and nm.is_host and m.game_authority is not None):
             return
         game_over, winner_pid = m.game_authority.handle_player_died(pid)
-        # Rimuoviamo SEMPRE il "fantasma" di chi muore, a prescindere dal fatto che decida
-        # anche la fine della partita.
         self.apply_player_removed(pid)
         nm.broadcast_rpc("player_removed", pid)
         if game_over:
@@ -196,9 +188,7 @@ class GameController:
                 self.apply_game_won(winner_pid)
                 m.network_manager.broadcast_rpc("game_won", winner_pid)
 
-    # ==================================================================
     # RPC: ciclo della partita
-    # ==================================================================
     def rpc_start_game(self, seed=None):
         m = self.model
         print("[Game] Host started the game")
@@ -336,9 +326,7 @@ class GameController:
         except Exception:
             self.view.display_error_message_screen("Connection failed.", self.view.show_local_mode_menu)
 
-    # ==================================================================
     # Sessioni di rete: Online (matchmaking + server dedicato)
-    # ==================================================================
     def start_online_client_session(self):
         m = self.model
         self.view.clear_all_ui_elements()
@@ -355,12 +343,6 @@ class GameController:
 
         status = nm.matchmaking_status
         if status == "matched":
-            # BUG FIX: se il "via" del server arriva piu' veloce di quanto questo polling se ne
-            # accorga (il primary vede subito tutti i giocatori connessi e parte da solo), la
-            # partita potrebbe essere GIA' iniziata (load_level() gia' chiamato da
-            # rpc_start_game, arrivato per la coda RPC prima che questo poll girasse di nuovo).
-            # Ridisegnare la lobby SOPRA una partita gia' caricata lasciava vedere il pavimento
-            # e i cartellini dei giocatori dietro alla schermata di lobby. Controlliamo prima.
             if not m.is_in_active_match():
                 invoke(self.view.show_lobby_screen, delay=0.2)
             return
@@ -380,9 +362,7 @@ class GameController:
             m.network_manager = None
         self.view.show_main_menu_screen()
 
-    # ==================================================================
     # Lobby
-    # ==================================================================
     def begin_game(self):
         m = self.model
         m.network_manager.send_rpc("start_game", m.game_authority.floor_seed)
@@ -401,9 +381,7 @@ class GameController:
         self.view.clear_all_ui_elements()
         self.view.show_main_menu_screen()
 
-    # ==================================================================
     # Migrazione dell'host (solo P2P)
-    # ==================================================================
     def check_host_migration(self):
         m = self.model
         nm = m.network_manager
@@ -464,9 +442,7 @@ class GameController:
         destroy(status)
         self.model.migrating = False
 
-    # ==================================================================
     # Ciclo di gioco (chiamato da main.py ogni frame)
-    # ==================================================================
     def update(self):
         m = self.model
         nm = m.network_manager
@@ -499,9 +475,6 @@ class GameController:
             nm.send_rpc("update_pos", nm.player_id, player.x, player.y, player.z)
             if nm.is_host and m.game_authority is not None:
                 m.game_authority.handle_update_pos(nm.player_id, player.x, player.y, player.z)
-                # L'host non riceve mai i propri pacchetti broadcast (send_raw/broadcast_rpc
-                # non fanno mai loopback verso se stessi) — senza questa chiamata la sua vista
-                # su other_players non si aggiornerebbe mai dopo la prima creazione.
                 self.rpc_state_snapshot(m.game_authority.snapshot_payload())
 
     def input(self, key):

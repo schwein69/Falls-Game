@@ -31,9 +31,8 @@ class FloorCube(Entity):
             texture = "floortxt"
         )
         self.block_type = block_type
-        self.block_id = block_id  # ID stabile, deciso in ordine di generazione: e' con questo
-                                   # numero che client e autorita' si riferiscono allo STESSO
-                                   # blocco fisico, indipendentemente da chi lo ha calpestato.
+        self.block_id = block_id  
+        
         self.color = color.white if block_type == 'normal' else (color.green if block_type == 'speed' else color.blue)
         self.has_activated = False  
         self.activation_distance = 2.0  
