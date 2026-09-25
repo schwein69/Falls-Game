@@ -1,0 +1,4 @@
+'poetry run python client/main.py' per il gioco,
+'poetry run python server/matchmaking_server.py' per il matchmaking, 
+'poetry run python -m unittest discover tests -v' per i test, 
+'poetry run streamlit run server/streamlit_dashboard.py' per la dashboard.

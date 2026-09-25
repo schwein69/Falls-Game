@@ -181,11 +181,9 @@ def run_primary(port, control_port, replica_port, players_info):
     run_as_active_server(port, players_info, authority, "[Primary]")
 
 
-# ------------------------------------------------------------------
 # Ruolo BACKUP
-# ------------------------------------------------------------------
 def run_backup(port, control_port, replica_port, players_info):
-    latest_state = {"value": None}  # dict-wrapper: modificabile dai thread senza "nonlocal"
+    latest_state = {"value": None}  
 
     def _replica_receiver():
         """Ascolta la connessione TCP dal primary e tiene aggiornato l'ultimo stato ricevuto.

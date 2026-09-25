@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "falls-game"
+version = "0.1.0"
+description = ""
+authors = ["Jiahao Guo <jiahao.guo@studio.unibo.it>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+ursina = "<8.3"
+redis = "^8.1.0"
+streamlit = "^1.64.0"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.1.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

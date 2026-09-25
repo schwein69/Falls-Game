@@ -10,11 +10,22 @@ for _p in (_client_dir, _shared_dir, _module_dir):
         sys.path.insert(0, _p)
 
 from ursina import *
+from ursina import application
+from pathlib import Path
 from model.game_model import GameModel
 from view.game_view import GameView
 from controller.game_controller import GameController
 
 app = Ursina()
+
+application.asset_folder = Path(_client_dir)
+application.models_compressed_folder = application.asset_folder / 'models_compressed/'
+application.textures_compressed_folder = application.asset_folder / 'textures_compressed/'
+application.scenes_folder = application.asset_folder / 'scenes/'
+application.scripts_folder = application.asset_folder / 'scripts/'
+application.fonts_folder = application.asset_folder / 'fonts/'
+if hasattr(application, 'compressed_models_folder'):
+    application.compressed_models_folder = application.models_compressed_folder
 
 model = GameModel()
 view = GameView(model)
@@ -32,7 +43,7 @@ def input(key):
 
 if __name__ == '__main__':
     window.borderless = False
-    window.title = "Falls Game"
+    window.title = "Fall Guys Ursina"
     window.exit_button.visible = False
     invoke(view.show_main_menu_screen, delay=0.1)
     app.run()
