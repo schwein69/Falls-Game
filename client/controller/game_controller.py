@@ -18,6 +18,7 @@ class GameController:
         self.model = model
         self.view = view
 
+        # Mappa nome-metodo RPC 
         self.rpc_registry = {
             "spawn_player": self.rpc_spawn_player,
             "update_pos": self.rpc_update_pos,
@@ -31,6 +32,7 @@ class GameController:
             "game_won": self.rpc_game_won,
             "start_game": self.rpc_start_game,
             "game_pause": self.rpc_game_pause,
+            "host_left": self.rpc_host_left,
         }
 
     # RPC: giocatori, spawn, posizione
@@ -70,7 +72,7 @@ class GameController:
             elif m.level_loaded:
                 self.rpc_spawn_player(pid, *pos)
 
-    # RPC: floor
+    # RPC: pavimento
     def rpc_block_step(self, pid, block_id):
         """SOLO l'host P2P valida questa richiesta. Un client normale non dovrebbe mai
         riceverlo, ma per sicurezza controlliamo comunque prima di agire."""
@@ -80,7 +82,7 @@ class GameController:
             return
         result = m.game_authority.handle_block_step(pid, block_id)
         if result is None:
-            return  
+            return  # gia' distrutto da qualcun altro: richiesta ignorata (idempotenza)
         self.apply_block_destroyed(result["block_id"], result["pid"])
         nm.broadcast_rpc("block_destroyed", result["block_id"], result["pid"])
 
@@ -176,8 +178,9 @@ class GameController:
         Button('Torna al menu', y=-0.15, scale=(0.3, 0.08), parent=camera.ui, on_click=self.reset_floor)
 
     def rpc_player_left(self, pid):
-        """Ricevuto quando un giocatore si disconnette."""
+        """Ricevuto quando un giocatore si disconnette"""
         m = self.model
+        m.connected_ids.discard(pid)
         if pid in m.other_players:
             print(f"[Game] Player {pid} Left")
             destroy(m.other_players[pid])
@@ -199,12 +202,19 @@ class GameController:
     def rpc_game_pause(self, is_paused, pid=None):
         self.model.game_paused = is_paused
         if is_paused:
-            Text(f"Waiting for Player {pid} to reconnect...", scale=1.5, origin=(0, 0), y=0.1, tag='pause_text')
+            Text(f"Waiting for Player {pid} to reconnect...", scale=1.5, origin=(0, 0), y=0.1,
+                 parent=camera.ui, tag='pause_text')
         else:
             print("[Game] RESUMED!")
             for t in scene.entities:
                 if hasattr(t, 'tag') and t.tag == 'pause_text':
                     destroy(t)
+
+    def rpc_host_left(self):
+        print("[Game] L'host ha chiuso la partita.")
+        self.reset_floor()
+        Text("L'host ha chiuso la partita.", scale=1.3, origin=(0, 0), y=0.1,
+             parent=camera.ui, color=color.orange)
 
     def handle_rpc(self, data):
         method = data.get("method")
@@ -233,15 +243,13 @@ class GameController:
         m.sky = Entity(model="sphere", texture=os.path.join("assets", "sky.png"),
                         scale=9999, double_sided=True)
 
-        start_pos = get_random_position()
         top_floor_y = (FLOOR_COUNT - 1) * FLOOR_HEIGHT
         for cube in m.floors.floor_cubes:
-            if (abs(cube.x - start_pos.x) < 0.01 and abs(cube.z - start_pos.z) < 0.01
-                    and abs(cube.y - top_floor_y) < 0.01):
+            if abs(cube.y - top_floor_y) < 0.01:
                 cube.collider = "box"
                 cube.collider_added = True
-                break
 
+        start_pos = get_random_position()
         m.player = Player(start_pos, f"Player {m.network_manager.player_id}")
         m.player.gravity = 0
         camera.z = -5
@@ -253,6 +261,8 @@ class GameController:
         m = self.model
         m.level_loaded = True
         m.player.gravity = 1
+        if m.network_manager:
+            m.network_manager.match_in_progress = True
 
         for pid in m.connected_ids:
             if pid not in m.other_players and pid != m.network_manager.player_id:
@@ -265,6 +275,8 @@ class GameController:
 
     def reset_floor(self):
         m = self.model
+        self.view.clear_all_ui_elements()
+
         if m.player is not None: destroy(m.player)
         if m.floors is not None: destroy(m.floors)
         if m.sky is not None: destroy(m.sky)
@@ -279,6 +291,8 @@ class GameController:
         m.game_over = False
 
         if m.network_manager is not None:
+            if m.network_manager.is_host:
+                m.network_manager.broadcast_rpc("host_left")
             m.network_manager.stop()
             m.network_manager = None
         m.game_authority = None
@@ -296,6 +310,15 @@ class GameController:
         m = self.model
         self.view.clear_all_ui_elements()
         m.network_manager, m.game_authority, m.broadcaster = network_p2p.start_p2p_host()
+        if m.game_authority is None:
+            if m.network_manager:
+                m.network_manager.stop()
+                m.network_manager = None
+            self.view.display_error_message_screen(
+                "Esiste gia' una sessione host attiva su questo PC (la porta P2P e' occupata). "
+                "Usa 'Join Game' per unirti a quella, oppure chiudila prima di crearne una nuova.",
+                self.view.show_local_mode_menu)
+            return
         invoke(self.view.show_lobby_screen, delay=0.5)
 
     def start_local_client_session(self):
@@ -372,6 +395,8 @@ class GameController:
         m = self.model
         m.lobby_open = False
         if m.network_manager:
+            if m.network_manager.is_host:
+                m.network_manager.broadcast_rpc("host_left")
             m.network_manager.stop()
             m.network_manager = None
         if m.broadcaster:

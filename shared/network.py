@@ -20,9 +20,7 @@ class NetworkManager:
         # Client connessi. (ip, porta) -> player_id
         self.clients = {}
 
-        # SOLO lato host: rilevamento di client silenziosi (calo di rete accidentale, non
-        # un'uscita volontaria — quella e' gestita separatamente e in modo immediato tramite
-        # DISCONNECT, vedi handle_internal_messages). (ip,porta) -> timestamp ultimo pacchetto.
+      
         self.client_last_seen = {}
         # (ip,porta) -> (player_id, timestamp_in_pausa): client sospettati disconnessi, in
         # attesa che si facciano risentire entro REJOIN_TIMER secondi prima di rimuoverli.
@@ -42,22 +40,18 @@ class NetworkManager:
         self.pending_migration_ids = set()
 
         self.msg_queue = queue.Queue()
-        # RLock (rientrante), non Lock semplice: check_client_liveness tiene il lock mentre
-        # chiama broadcast_rpc, che a sua volta lo riprende — con un Lock normale (non
-        # rientrante) questo e' un deadlock immediato (lo stesso thread si blocca aspettando
-        # se stesso). Con RLock lo stesso thread puo' riacquisirlo senza problemi.
         self.lock = threading.RLock()
         self._tick_thread = None
         self._heartbeat_thread = None
 
-        # SOLO modalita' Online: connessione TCP persistente col proxy di partita (vedi
-        # network_online.py/_connect_via_proxy). None se stiamo giocando in P2P locale.
         self.proxy_sock = None
+
+        self.match_in_progress = False
 
     def prepare_local_socket(self):
         """Crea (se non esiste gia') il socket UDP locale e ne restituisce la porta assegnata.
         Usato in modalita' online per conoscere la nostra porta PRIMA di comunicarla al
-        matchmaking server (vedi network_online.py)."""
+        matchmaking server"""
         if self.sock is None:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(('', 0))
@@ -106,8 +100,6 @@ class NetworkManager:
     # INVIO DATI
     # ================================
     def send_rpc(self, method_name, *args):
-        """Da usare per mandare un RPC verso l'host/server (se siamo client) oppure verso tutti
-        i client registrati (se siamo host/server) con il NOSTRO id come mittente."""
         if self.player_id is None and not self.is_host:
             return
         data = {"method": method_name, "args": args, "sender_id": self.player_id}
@@ -184,7 +176,7 @@ class NetworkManager:
 
     def start_heartbeat(self, interval=HEARTBEAT_INTERVAL):
         """SOLO lato host: manda un piccolo segnale di vita a tutti i client a intervalli
-        regolari, cosi' possono accorgersi se l'host sparisce (vedi host_alive) anche quando
+        regolari, cosi' possono accorgersi se l'host sparisce anche quando
         non c'e' ancora nessuno stato di gioco da trasmettere (es. in lobby, prima che la
         partita inizi). Sullo STESSO intervallo, controlla anche se qualche CLIENT e' rimasto
         silenzioso troppo a lungo — vedi check_client_liveness."""
@@ -211,6 +203,10 @@ class NetworkManager:
         (basta che riprenda a mandare pacchetti dalla STESSA porta — non serve nessun
         protocollo di rientro esplicito, un blip di rete si risolve da solo, vedi
         on_receive_data). Se il tempo scade senza notizie, lo rimuove definitivamente."""
+
+  
+        if not self.match_in_progress:
+            return
         now = time.time()
         with self.lock:
             for addr, pid in list(self.clients.items()):
@@ -242,18 +238,12 @@ class NetworkManager:
             return True
         return (time.time() - self.last_host_seen) < timeout
 
-    # ================================
     # RICEZIONE DATI
-    # ================================
     def receive_loop(self):
         while self.running:
             try:
                 data, addr = self.sock.recvfrom(8192)
                 self.on_receive_data(data, addr)
-            except (ConnectionResetError, OSError) as e:
-                if self.running:
-                    print(f"[Network] Pacchetto UDP scartato (errore transitorio innocuo): {e}")
-                continue
             except Exception as e:
                 if self.running:
                     print(f"Errore nel receive loop: {e}")
@@ -261,8 +251,6 @@ class NetworkManager:
 
     def on_receive_data(self, data_bytes, addr):
         if not self.is_host:
-            # Siamo client: qualunque cosa riceviamo arriva per forza dall'host (topologia a
-            # stella), quindi ogni pacchetto e' un segnale di vita implicito.
             self.last_host_seen = time.time()
         try:
             msg = data_bytes.decode().strip()
@@ -283,22 +271,12 @@ class NetworkManager:
                           f"registrato come pid={real_pid}")
                     return
 
-                # Qualunque pacchetto valido da un client registrato conta come segnale di vita
-                # — non serve un heartbeat dedicato, update_pos arriva gia' continuamente.
                 self.client_last_seen[addr] = time.time()
                 if addr in self.disconnected_clients:
-                    # Era stato segnalato come silenzioso, ma ha ripreso a mandare pacchetti
-                    # dalla STESSA porta prima che scadesse la grazia: rientro automatico, non
-                    # serve nessun protocollo esplicito, un calo di rete si e' solo risolto da
-                    # solo.
                     print(f"[Host] Player {real_pid} e' rientrato.")
                     del self.disconnected_clients[addr]
                     self.broadcast_rpc("game_pause", False, real_pid)
 
-                # Relay automatico SOLO per i metodi "semplici". update_pos e block_step
-                # vengono gestiti esplicitamente dal gestore RPC lato host/server (vedi
-                # RPC_REGISTRY in main.py / game_instance.py), che decide se/come propagarli
-                # dopo averli passati all'autorita' di gioco.
                 if payload.get("method") in self.AUTO_RELAY_METHODS:
                     self.relay_broadcast(msg, exclude_addr=addr)
 
@@ -320,11 +298,6 @@ class NetworkManager:
                 parts = msg.split('|')
                 migration_rejoin_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
 
-                # Rientro dopo una migrazione dell'host: questo giocatore esisteva GIA' in
-                # partita con questo id (lo sapevamo perche' era tra i sopravvissuti al momento
-                # dell'elezione, vedi network_p2p.promote_to_host). Lo ri-registriamo con lo
-                # STESSO id, senza rispedire uno spawn_player: gli altri sopravvissuti hanno
-                # gia' la sua RemotePlayer da prima che l'host morisse, non e' un nuovo arrivo.
                 if migration_rejoin_id is not None and migration_rejoin_id in self.pending_migration_ids:
                     self.clients[addr] = migration_rejoin_id
                     self.pending_migration_ids.discard(migration_rejoin_id)

@@ -15,8 +15,6 @@ st.set_page_config(page_title="Falls Game — Matchmaking Dashboard", layout="wi
 
 @st.cache_resource
 def get_redis_client():
-    # @st.cache_resource: la connessione a Redis viene creata una volta sola per l'intera
-    # sessione dell'app, non ricreata ad ogni refresh
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 
@@ -62,7 +60,7 @@ def render(placeholder):
         if pending:
             st.dataframe(
                 [{"ID": p["id"], "IP": p["ip"], "Porta UDP": p["udp_port"]} for p in pending],
-                use_container_width=True, hide_index=True,
+                width='stretch', hide_index=True,
             )
         else:
             st.caption("Nessun giocatore in attesa al momento.")
@@ -78,7 +76,7 @@ def render(placeholder):
                     "Giocatori": ", ".join(str(p) for p in info.get("players", [])),
                     "Durata": f"{int(elapsed // 60)}m {int(elapsed % 60)}s",
                 })
-            st.dataframe(rows, use_container_width=True, hide_index=True)
+            st.dataframe(rows, width='stretch', hide_index=True)
         else:
             st.caption("Nessuna partita attiva al momento.")
 

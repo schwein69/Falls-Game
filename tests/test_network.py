@@ -1,13 +1,3 @@
-"""
-Test di integrazione per network.py/network_p2p.py: usano socket UDP su localhost (porte
-diverse per ogni test, per non scontrarsi tra loro), ma nessuna finestra grafica — non serve
-avviare Ursina. Coprono esattamente gli scenari da testare manualmente con piu' istanze:
-piu' client connessi, disconnessione, migrazione dell'host.
-
-Si lanciano con:
-    python -m unittest tests.test_network_integration -v
-
-"""
 import sys
 import os
 import time
@@ -19,8 +9,7 @@ import network_p2p
 
 
 def _collect_methods(nm, timeout=0.5):
-    """Drena la coda dei messaggi in arrivo per un po' e ritorna la lista dei metodi RPC
-    ricevuti (solo i nomi, per asserzioni semplici nei test)."""
+    """ritorna la lista dei metodi RPC ricevuti"""
     received = []
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -34,7 +23,7 @@ class TestMultiClientRoster(unittest.TestCase):
     """Copre: 'avviare piu' istanze e vedere tutti i giocatori correttamente'."""
 
     def setUp(self):
-        self.port = 19100 + (id(self) % 500)  # porta diversa per ogni test, riduce collisioni
+        self.port = 19100 + (id(self) % 500)  # porta diversa per ogni test
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
         self.host.host_is_player = True
@@ -137,7 +126,7 @@ class TestHostMigration(unittest.TestCase):
         self.assertEqual(elected_id, c1.player_id,
                           "il primo client ad unirsi ha sempre l'id piu' basso tra i due client")
 
-        # L'host sparisce.
+        # L'host "sparisce" senza avvisare nessuno (simula un crash, non un leave pulito).
         host.running = False
         host.sock.close()
 
@@ -168,3 +157,133 @@ class TestHostMigration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClientDisconnectPauseAndRejoin(unittest.TestCase):
+    """Copre: 'la pausa e il rientro al match' — un client che smette di mandare pacchetti
+    (calo di rete, non un'uscita volontaria) deve mettere tutti in pausa, e se torna a farsi
+    sentire in tempo la partita riprende senza bisogno di nessun protocollo di rientro speciale.
+    Usiamo timeout/grace_period MOLTO corti (passati esplicitamente) per non far durare i test
+    minuti interi con i valori reali di config.py."""
+
+    def setUp(self):
+        self.port = 19700 + (id(self) % 200)
+        self.host = NetworkManager()
+        self.host.setup_host(port=self.port)
+        self.host.host_is_player = True
+        # Il controllo del silenzio vale solo a partita iniziata (vedi match_in_progress in
+        # network.py: in lobby un client non manda nulla, non e' "disconnesso"). Questi test
+        # simulano una partita in corso.
+        self.host.match_in_progress = True
+
+    def tearDown(self):
+        self.host.stop()
+
+    def test_silent_client_triggers_pause_then_gets_removed_if_never_returns(self):
+        client = NetworkManager()
+        client.join_network("127.0.0.1", self.port)
+        time.sleep(0.2)
+        client.send_rpc("update_pos", client.player_id, 0, 0, 0)
+
+        # Aspettiamo PIU' del timeout (0.3s) senza mandare nient'altro: deve risultare sospetto.
+        time.sleep(0.4)
+        self.host.check_client_liveness(timeout=0.3, grace_period=0.5)
+        self.assertIn(client.player_id, [pid for _, (pid, _) in self.host.disconnected_clients.items()],
+                       "dopo il timeout di silenzio, il client deve risultare 'in pausa'")
+
+        # Il tempo di grazia (0.5s) scade senza che si faccia risentire: viene rimosso per davvero.
+        time.sleep(0.6)
+        self.host.check_client_liveness(timeout=0.3, grace_period=0.5)
+        remaining_pids = list(self.host.clients.values())
+        self.assertNotIn(client.player_id, remaining_pids,
+                          "dopo la scadenza della grazia, il client va rimosso per davvero")
+        client.stop()
+
+    def test_client_that_resumes_traffic_is_not_removed(self):
+        client = NetworkManager()
+        client.join_network("127.0.0.1", self.port)
+        time.sleep(0.2)
+        client.send_rpc("update_pos", client.player_id, 0, 0, 0)  # stabilisce un "ultimo visto"
+
+        # Aspettiamo piu' di un timeout molto breve, cosi' risulta sospetto...
+        time.sleep(0.15)
+        self.host.check_client_liveness(timeout=0.1, grace_period=5.0)
+        self.assertTrue(len(self.host.disconnected_clients) > 0)
+
+        # ...ma poi ricomincia a mandare pacchetti PRIMA che scada la grazia (5s): deve
+        # rientrare da solo, senza essere rimosso.
+        client.send_rpc("update_pos", client.player_id, 1, 1, 1)
+        time.sleep(0.2)
+
+        self.assertEqual(len(self.host.disconnected_clients), 0,
+                          "riprendendo a mandare pacchetti, il client deve rientrare da solo")
+        self.assertIn(client.player_id, self.host.clients.values(),
+                       "il client rimane registrato, non viene mai rimosso")
+        client.stop()
+
+
+class TestJoinReliability(unittest.TestCase):
+    """Regressioni trovate misurando la catena Online reale: il JOIN_REQUEST UDP veniva mandato
+    UNA volta sola. In Online il proxy e' pronto (TCP) prima che il processo primary abbia
+    legato la sua porta UDP: se il pacchetto arrivava in quella finestra andava perso e il
+    client restava senza id per sempre."""
+
+    def setUp(self):
+        self.port = 19400 + (id(self) % 200)
+        self.server = None
+        self.client = None
+
+    def tearDown(self):
+        if self.client:
+            self.client.stop()
+        if self.server:
+            self.server.stop()
+
+    def test_client_joins_even_if_server_starts_late(self):
+        self.client = NetworkManager()
+        self.client.join_network("127.0.0.1", self.port)   # server ancora spento: primo pacchetto perso
+        time.sleep(1.0)
+        self.server = NetworkManager()
+        self.server.setup_host(port=self.port)              # parte in ritardo
+        deadline = time.time() + 4
+        while self.client.player_id is None and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertIsNotNone(self.client.player_id,
+                             "il client doveva ritentare il JOIN e ottenere un id")
+
+    def test_join_retries_never_create_phantom_players(self):
+        """In P2P l'id e' len(clients)+1: senza idempotenza ogni ritentativo creerebbe un
+        giocatore in piu'."""
+        self.server = NetworkManager()
+        self.server.setup_host(port=self.port)
+        self.client = NetworkManager()
+        self.client.join_network("127.0.0.1", self.port)
+        time.sleep(0.3)
+        # duplicati espliciti dallo STESSO indirizzo, come farebbe il ritentativo
+        for _ in range(4):
+            self.client.sock.sendto(b"JOIN_REQUEST", ("127.0.0.1", self.port))
+            time.sleep(0.05)
+        time.sleep(0.5)
+        self.assertEqual(len(self.server.clients), 1,
+                         "i JOIN_REQUEST duplicati non devono registrare giocatori in piu'")
+        self.assertEqual(self.client.player_id, 1)
+
+
+class TestLobbyIsNotMistakenForDisconnect(unittest.TestCase):
+    """Regressione del 'rematch bloccato': in lobby un client non manda pacchetti, quindi il
+    controllo del silenzio NON deve scattare finche' la partita non e' iniziata."""
+
+    def test_silence_in_lobby_is_ignored_until_match_starts(self):
+        host = NetworkManager()
+        host.is_host = True
+        addr = ("127.0.0.1", 55555)
+        host.clients[addr] = 1
+        host.client_last_seen[addr] = time.time() - 30       # 30s di silenzio
+
+        host.match_in_progress = False                        # ancora in lobby
+        host.check_client_liveness(timeout=5, grace_period=10)
+        self.assertEqual(len(host.disconnected_clients), 0)
+
+        host.match_in_progress = True                         # partita iniziata
+        host.check_client_liveness(timeout=5, grace_period=10)
+        self.assertEqual(len(host.disconnected_clients), 1)

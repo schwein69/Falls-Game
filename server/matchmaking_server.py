@@ -1,8 +1,3 @@
-"""
-Matchmaking server: mette in coda i client, li raggruppa in partite, avvia il proxy per
-ciascuna.
-"""
-
 import socket
 import threading
 import subprocess
@@ -19,19 +14,18 @@ REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
-STATUS_KEY = "matchmaking:status"  # una singola chiave con tutto lo stato in JSON: semplice,
-                                    # e sufficiente per una dashboard di sola lettura come questa
+STATUS_KEY = "matchmaking:status"  
 
 pending_clients = []  # list of (player_id, client_ip, udp_port, tcp_conn)
 active_games = {}     # port -> {players: [...], start_ts: ...}
+active_processes = {} # port -> subprocess.Popen del proxy di quella partita — serve SOLO per
+                       # sapere quando la partita e' davvero finita, vedi cleanup_finished_games()
 next_game_port = GAME_INSTANCE_BASE_PORT
 port_lock = threading.Lock()
+CLEANUP_INTERVAL = 2.0  # secondi tra un controllo delle partite concluse e il successivo
 
 
 def write_status():
-    """Pubblica lo stato corrente su Redis. Chiamata ad ogni cambiamento (nuovo client in coda,
-    nuova partita avviata) — la dashboard Streamlit lo rilegge a intervalli fissi per conto suo,
-    vedi streamlit_dashboard.py."""
     try:
         data = {
             "pending": [{"id": p[0], "ip": p[1], "udp_port": p[2]} for p in pending_clients],
@@ -44,10 +38,6 @@ def write_status():
 
 
 def _wait_for_proxy_ready(tcp_port, timeout=5.0):
-    """Prova a connettersi brevemente alla porta TCP del proxy appena lanciato, per verificare
-    che sia davvero pronto ad accettare client prima di notificarli. Se non ce la fa entro
-    'timeout' secondi, va avanti comunque (i client hanno il loro ritentativo come rete di
-    sicurezza, vedi network_online._connect_via_proxy)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -62,9 +52,19 @@ def _wait_for_proxy_ready(tcp_port, timeout=5.0):
     return False
 
 
+def _remove_from_queue(entry, reason):
+    """Toglie un giocatore dalla coda in modo sicuro (idempotente: se e' gia' stato tolto,
+    es. perche' nel frattempo e' scattato un match, non fa nulla di male a riprovare)."""
+    with port_lock:
+        if entry in pending_clients:
+            pending_clients.remove(entry)
+            print(f"{LOG_PREFIX} Player {entry[0]} rimosso dalla coda ({reason}).")
+            write_status()
+
+
 def handle_client(conn, addr):
-    """Handle a single matchmaking client connection."""
     global next_game_port
+    entry = None
     try:
         data = conn.recv(2048).decode()
         info = json.loads(data)
@@ -73,8 +73,9 @@ def handle_client(conn, addr):
         client_ip = addr[0]
         print(f"{LOG_PREFIX} New matchmaking connection: {player_id}@{client_ip}:{udp_port}")
 
+        entry = (player_id, client_ip, udp_port, conn)
         with port_lock:
-            pending_clients.append((player_id, client_ip, udp_port, conn))
+            pending_clients.append(entry)
             write_status()
             if len(pending_clients) >= MAX_PLAYERS:
                 group = pending_clients[:MAX_PLAYERS]
@@ -89,8 +90,9 @@ def handle_client(conn, addr):
                 print(f"{LOG_PREFIX} Avvio il proxy (porta TCP {proxy_tcp_port}, blocco UDP da "
                       f"{udp_base_port}) per i giocatori: {[p[0] for p in players_info]}")
                 proxy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy.py")
-                subprocess.Popen([sys.executable, proxy_path,
+                proxy_process = subprocess.Popen([sys.executable, proxy_path,
                                    str(proxy_tcp_port), players_json, str(udp_base_port)])
+                active_processes[proxy_tcp_port] = proxy_process
 
                 _wait_for_proxy_ready(proxy_tcp_port)
 
@@ -107,13 +109,38 @@ def handle_client(conn, addr):
                         c.close()
                     except Exception as e:
                         print(f"{LOG_PREFIX} Failed to notify client {pid}: {e}")
+                return  # consumato da un match: questa connessione ha gia' fatto il suo dovere
             else:
                 try:
                     conn.sendall(b"WAIT")
-                except:
+                except Exception:
+                    _remove_from_queue(entry, "connessione persa mentre mandavo WAIT")
+                    return
+
+        while True:
+            try:
+                data = conn.recv(64)
+            except Exception:
+                data = b""
+            if not data:
+                _remove_from_queue(entry, "connessione chiusa dal client")
+                try:
+                    conn.close()
+                except Exception:
                     pass
+                return
+            if data.strip() == b"CANCEL":
+                _remove_from_queue(entry, "annullato esplicitamente dal client")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return
+
     except Exception as e:
         print(f"{LOG_PREFIX} Error handling matchmaking client: {e}")
+        if entry is not None:
+            _remove_from_queue(entry, "errore nella connessione")
         try:
             conn.close()
         except:
@@ -122,8 +149,25 @@ def handle_client(conn, addr):
         write_status()
 
 
+def cleanup_finished_games():
+    while True:
+        time.sleep(CLEANUP_INTERVAL)
+        with port_lock:
+            finished_ports = [port for port, proc in active_processes.items()
+                               if proc.poll() is not None]
+            if not finished_ports:
+                continue
+            for port in finished_ports:
+                print(f"{LOG_PREFIX} Partita sulla porta {port} conclusa (il proxy si e' "
+                      f"chiuso). Rimossa dalla lista.")
+                active_games.pop(port, None)
+                active_processes.pop(port, None)
+            write_status()
+
+
 def start_matchmaking():
     write_status()
+    threading.Thread(target=cleanup_finished_games, daemon=True).start()
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

@@ -9,7 +9,7 @@ class GameView:
 
     # Utilita'
     def clear_all_ui_elements(self):
-        for e in camera.ui.children:
+        for e in list(camera.ui.children):
             destroy(e)
         self.model.gui_elements.clear()
         self.model.player_labels.clear()
@@ -55,7 +55,7 @@ class GameView:
         def refresh_host_buttons():
             if not listener.running:
                 if not host_buttons or not isinstance(host_buttons[-1], Text):
-                    msg = Text("",
+                    msg = Text("Ricerca automatica non disponibile su questa macchina.",
                                y=0.15, scale=0.7, origin=(0, 0), parent=camera.ui)
                     host_buttons.append(msg)
                 return

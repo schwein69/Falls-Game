@@ -1,23 +1,3 @@
-"""
-Proxy di partita: nasconde ai client la coppia primary/backup. I client si connettono QUI in
-TCP (connessione tenuta aperta per tutta la partita) per sapere a chi mandare il traffico UDP
-di gioco vero e proprio — che invece va SEMPRE diretto, mai attraverso il proxy.
-
-Compiti:
-  1. Lancia i due processi server/game_instance.py: uno --role primary (attivo da subito), uno
-     --role backup (passivo, riceve solo una copia dello stato).
-  2. Accetta le connessioni TCP dei client di questa partita e manda a ciascuno l'indirizzo
-     UDP del primary ATTUALE.
-  3. Controlla periodicamente che il primary sia ancora vivo (processo non terminato). Se
-     crasha, ordina al backup di promuoversi (comando "PROMOTE" sul suo canale di controllo) e
-     avvisa TUTTI i client gia' connessi, sulla STESSA connessione TCP gia' aperta — nessuna
-     azione richiesta al giocatore, la partita non si interrompe.
-
-
-LIMITE NOTO: un solo failover per partita (dopo la promozione, il backup diventato primary non
-ha piu' un proprio backup dietro di se').
-"""
-
 import sys
 import os
 import json
@@ -30,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from config import LOG_PREFIX, MAX_PLAYERS
 
 GAME_INSTANCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_instance.py")
-HEALTH_CHECK_INTERVAL = 1.0 
+HEALTH_CHECK_INTERVAL = 1.0  # secondi tra un controllo di vita del primary e il successivo
 
 
 class MatchProxy:
@@ -42,12 +22,14 @@ class MatchProxy:
         self.backup_control_port = udp_base_port + 2
         self.replica_port = udp_base_port + 3
 
-        self.client_sockets = []  
+        self.client_sockets = []   # connessioni TCP persistenti verso i client di questa partita
         self.lock = threading.Lock()
         self.primary_process = None
         self.backup_process = None
         self.failover_done = False
+        self.should_exit = threading.Event()
 
+    # ------------------------------------------------------------------
     def start(self):
         self._spawn_primary()
         self._spawn_backup()
@@ -58,7 +40,7 @@ class MatchProxy:
         args = [sys.executable, GAME_INSTANCE_PATH,
                 "--role", "primary",
                 "--udp-port", str(self.primary_port),
-                "--control-port", "0", 
+                "--control-port", "0",  # il primary non riceve mai comandi di controllo
                 "--replica-port", str(self.replica_port),
                 "--players", json.dumps(self.players_info)]
         self.primary_process = subprocess.Popen(args)
@@ -76,6 +58,7 @@ class MatchProxy:
         print(f"{LOG_PREFIX}[Proxy] Backup avviato (pid processo {self.backup_process.pid}, "
               f"porta UDP {self.backup_port}, in ascolto passivo).")
 
+    # ------------------------------------------------------------------
     def _accept_clients(self):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -96,20 +79,33 @@ class MatchProxy:
         except Exception as e:
             print(f"{LOG_PREFIX}[Proxy] Errore mandando l'indirizzo del primary a un client: {e}")
 
+    # ------------------------------------------------------------------
     def _health_check_loop(self):
-        while True:
+        while not self.should_exit.is_set():
             time.sleep(HEALTH_CHECK_INTERVAL)
-            if self.failover_done:
-                return 
-            if self.primary_process.poll() is not None:
-                print(f"{LOG_PREFIX}[Proxy] PRIMARY CRASHATO (codice uscita "
-                      f"{self.primary_process.returncode}). Avvio il failover...")
-                self._failover()
+            current = self.backup_process if self.failover_done else self.primary_process
+            code = current.poll()
+            if code is None:
+                continue  # ancora vivo, tutto normale
+
+            if code == 0:
+                print(f"{LOG_PREFIX}[Proxy] La partita e' finita (tutti i giocatori se ne sono "
+                      f"andati). Chiudo il proxy.")
+                self._shutdown()
                 return
 
+            if self.failover_done:
+                print(f"{LOG_PREFIX}[Proxy] Anche il nuovo primary e' crashato (codice {code}), "
+                      f"e non c'e' piu' un backup dietro. Chiudo.")
+                self._shutdown()
+                return
+
+            print(f"{LOG_PREFIX}[Proxy] PRIMARY CRASHATO (codice uscita {code}). "
+                  f"Avvio il failover...")
+            self._failover()
+
     def _failover(self):
-        """Promuove il backup e avvisa tutti i client — TRASPARENTE: nessuna azione richiesta
-        al giocatore, la connessione TCP con il proxy era gia' aperta da prima."""
+        """Promuove il backup e avvisa tutti i client"""
         try:
             ctrl = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             ctrl.settimeout(3.0)
@@ -130,6 +126,21 @@ class MatchProxy:
                     print(f"{LOG_PREFIX}[Proxy] Errore avvisando un client del failover: {e}")
         print(f"{LOG_PREFIX}[Proxy] Failover completato. Nuovo primary sulla porta UDP {self.backup_port}.")
 
+    def _shutdown(self):
+        for proc in (self.primary_process, self.backup_process):
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        with self.lock:
+            for conn in self.client_sockets:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        self.should_exit.set()
+
 
 def main():
     if len(sys.argv) < 4:
@@ -144,8 +155,7 @@ def main():
     proxy.start()
 
     try:
-        while True:
-            time.sleep(5)
+        proxy.should_exit.wait()
     except KeyboardInterrupt:
         pass
 

@@ -1,34 +1,3 @@
-#!/usr/bin/env python3
-"""
-Game instance: processo headless (nessuna finestra, nessun rendering Ursina) che fa da server
-autoritativo per UNA partita online. Fa parte della coppia primary/backup gestita da
-server/proxy.py — non viene mai lanciato ne' contattato direttamente dai client, che parlano
-sempre e solo con il proxy (per sapere chi e' il primary in questo momento) e poi in UDP
-diretto con qualunque istanza sia attualmente attiva.
-
-Due ruoli possibili:
-
-  PRIMARY: attivo fin da subito. Fa esattamente quello che gia' faceva game_instance.py prima
-    di questa modifica (relay UDP autoritativo tra i client) — PIU' una novita': ogni tanto
-    replica il proprio stato (GameAuthority.to_dict()) al BACKUP via una connessione TCP
-    dedicata, cosi' quest'ultimo puo' subentrare senza ripartire da zero se il primary crasha.
-
-  BACKUP: passivo. Non apre nessuna porta UDP di gioco finche' non viene promosso. Riceve solo
-    lo stato replicato dal primary (lo tiene aggiornato ma non lo usa per nient'altro) e ascolta
-    un comando di controllo dal proxy: "PROMOTE". Quando arriva, diventa immediatamente un
-    server attivo a tutti gli effetti, usando l'ULTIMO stato ricevuto dal primary invece di
-    ripartire da zero (partita gia' in corso, blocchi gia' distrutti, posizioni note — tutto
-    preservato, come richiesto: il crash del primary non deve interrompere la partita).
-
-LIMITE NOTO: dopo UNA promozione, il backup diventato primary non ha piu' un proprio backup
-dietro di se' (nessuna ri-creazione automatica di un nuovo passive replica). Tollera un solo
-guasto per partita, non guasti multipli in sequenza — estensione ragionevole ma fuori scope qui.
-
-Uso:
-    python game_instance.py --role primary --udp-port <P> --control-port <C> --replica-port <R> --players '<json>'
-    python game_instance.py --role backup  --udp-port <P> --control-port <C> --replica-port <R> --players '<json>'
-"""
-
 import sys
 import os
 import json
@@ -44,17 +13,13 @@ from game_authority import GameAuthority
 from config import LOG_PREFIX
 
 JOIN_TIMEOUT_SECONDS = 30
-IDLE_SHUTDOWN_SECONDS = 20
+IDLE_SHUTDOWN_SECONDS = 5
 STATUS_POLL_INTERVAL = 0.1
 SNAPSHOT_INTERVAL = 0.05       # 20 Hz: cadenza con cui ridistribuiamo le posizioni ai client
 REPLICATION_INTERVAL = 0.2     # 5 Hz: cadenza con cui il primary replica lo stato al backup
 
 
-# ------------------------------------------------------------------
-# Gestione RPC dei client (identica sia che siamo primary da subito, sia che lo siamo
-# diventati per promozione — la logica di gioco non cambia in base al COME siamo diventati
-# attivi, solo in base al fatto che LO SIAMO)
-# ------------------------------------------------------------------
+# Gestione RPC dei client 
 def make_rpc_handler(nm, authority):
     def handle(payload):
         method = payload.get("method")
@@ -87,10 +52,6 @@ def make_rpc_handler(nm, authority):
 
 
 def run_as_active_server(port, players_info, authority, log_tag):
-    """Il cuore del server di gioco vero e proprio: aspetta i giocatori, avvia la partita,
-    fa da relay/autorita' finche' non resta piu' nessuno. Usato SIA dal primary all'avvio SIA
-    dal backup nel momento in cui viene promosso — stessa identica logica, cambia solo quando
-    viene chiamata e con quale GameAuthority (nuova, o ripristinata da uno stato replicato)."""
     nm = start_dedicated_server(port, players_info)
     expected_count = len(players_info)
 
@@ -119,6 +80,7 @@ def run_as_active_server(port, players_info, authority, log_tag):
 
     print(f"{LOG_PREFIX}{log_tag} {len(nm.clients)} giocatori connessi. Via!")
     nm.broadcast_rpc("start_game", authority.floor_seed)
+    nm.match_in_progress = True
     nm.start_broadcast_tick(authority.snapshot_payload, interval=SNAPSHOT_INTERVAL)
 
     last_seen_player_time = time.time()
@@ -141,7 +103,7 @@ def run_as_active_server(port, players_info, authority, log_tag):
 # Ruolo PRIMARY
 # ------------------------------------------------------------------
 def replicate_to_backup(get_state_fn, backup_replica_port, interval=REPLICATION_INTERVAL):
-    """SOLO primary: prova a connettersi al backup (riprovando finche' non e' su) e gli manda
+    """SOLO primary: prova a connettersi al backup  e gli manda
     una copia dello stato (GameAuthority.to_dict()) a intervalli regolari, una riga JSON alla
     volta. E' un semplice canale "push": il primary parla, il backup ascolta e basta."""
     def _loop():
@@ -175,8 +137,6 @@ def replicate_to_backup(get_state_fn, backup_replica_port, interval=REPLICATION_
 
 def run_primary(port, control_port, replica_port, players_info):
     authority = GameAuthority()
-    # La replica parte SUBITO, anche prima che arrivi qualche giocatore: cosi' il backup ha
-    # gia' il seed corretto del pavimento fin dall'inizio, non solo dopo il primo aggiornamento.
     replicate_to_backup(authority.to_dict, replica_port)
     run_as_active_server(port, players_info, authority, "[Primary]")
 
@@ -186,9 +146,7 @@ def run_backup(port, control_port, replica_port, players_info):
     latest_state = {"value": None}  
 
     def _replica_receiver():
-        """Ascolta la connessione TCP dal primary e tiene aggiornato l'ultimo stato ricevuto.
-        Non fa NULLA con quello stato finche' non arriva l'ordine di promozione — un backup
-        passivo, appunto: osserva, non agisce."""
+        """Ascolta la connessione TCP dal primary e tiene aggiornato l'ultimo stato ricevuto."""
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("", replica_port))
@@ -213,12 +171,6 @@ def run_backup(port, control_port, replica_port, players_info):
                             except Exception:
                                 pass
             except (ConnectionResetError, OSError) as e:
-                # BUG FIX: prima un reset della connessione (es. il primary che si riavvia, o
-                # una disconnessione brusca) faceva CRASHARE questo thread per sempre — il
-                # backup restava senza nessuno che gli replicasse piu' nulla, silenziosamente,
-                # senza nessun modo di recuperare. Ora torniamo semplicemente in ascolto di una
-                # NUOVA connessione, mantenendo per il momento l'ultimo stato gia' ricevuto
-                # (meglio uno stato un po' vecchio che nessuno stato).
                 print(f"{LOG_PREFIX}[Backup] Connessione di replica interrotta ({e}). "
                       f"Torno in ascolto di una nuova connessione dal primary.")
             finally:
@@ -246,8 +198,6 @@ def run_backup(port, control_port, replica_port, players_info):
     if latest_state["value"] is not None:
         authority = GameAuthority.from_dict(latest_state["value"])
     else:
-        # Non abbiamo mai ricevuto nulla dal primary (crash fulmineo, subito dopo l'avvio):
-        # ripartiamo con uno stato vuoto, e' il caso peggiore ma non c'e' altro da ripristinare.
         print(f"{LOG_PREFIX}[Backup] Nessuno stato replicato disponibile, riparto da zero.")
         authority = GameAuthority()
 

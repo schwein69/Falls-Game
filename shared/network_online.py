@@ -1,18 +1,10 @@
 """
-Lato client-server (Online): tutto cio' che riguarda SOLO la modalita' con matchmaking e server
-dedicato. Non sa nulla di P2P locale o discovery LAN: quello vive in network_p2p.py.
-
 Contiene le DUE meta' della stessa architettura:
   - start_online_session()   -> lato CLIENT: handshake col matchmaking, poi connessione al
                                  server dedicato assegnato.
   - start_dedicated_server() -> lato SERVER: usato da server/game_instance.py per mettersi in
                                  ascolto sulla porta decisa dal matchmaking, pre-autorizzando
                                  solo i giocatori di quella partita.
-
-In questa modalita' l'host UDP non e' MAI un giocatore (a differenza del P2P): e' sempre un
-processo separato. I client non si parlano mai tra loro, solo con questo processo — vedi
-network.py, dove join_network manda pacchetti solo verso (host_ip, host_port), mai verso altri
-client.
 """
 
 import socket
@@ -25,9 +17,7 @@ from network import NetworkManager
 from config import MATCHMAKING_HOSTNAME, MATCHMAKING_TCP_PORT
 
 
-# ------------------------------------------------------------------
 # Lato client
-# ------------------------------------------------------------------
 def start_online_session():
     """Crea una NetworkManager e avvia in background l'handshake col matchmaking server. Lo
     stato dell'handshake si legge da network_manager.matchmaking_status /
@@ -72,14 +62,6 @@ def _matchmaking_handshake(nm):
                 if msg.startswith("GAME:"):
                     _, host, port_str = msg.split(":")
                     print(f"[Network] Match trovato! Mi connetto al proxy {host}:{port_str}")
-                    # BUG FIX: prima "matched" veniva impostato QUI, prima ancora di sapere se
-                    # la connessione al proxy sarebbe davvero riuscita. screens.py smette di
-                    # controllare lo stato non appena lo vede diventare "matched" (passa alla
-                    # lobby e non guarda piu'). Se poi _connect_via_proxy falliva (es. il proxy
-                    # non aveva ancora finito di avviarsi), l'errore risultante spariva nel
-                    # nulla: nessuno stava piu' controllando "matchmaking_error", il client
-                    # restava bloccato in silenzio in lobby senza mai entrare in partita.
-                    # Ora "matched" si imposta SOLO se la connessione e' davvero riuscita.
                     _connect_via_proxy(nm, host, int(port_str))
                     nm.matchmaking_status = "matched"
                     return
@@ -93,14 +75,7 @@ def _matchmaking_handshake(nm):
 def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10):
     """Ci connettiamo al proxy della partita via TCP e restiamo in ascolto per tutta la sua
     durata: e' cosi' che sappiamo a chi mandare il traffico UDP di gioco ORA, e come veniamo
-    avvisati se cambia (il primary crasha, subentra il backup) — la connessione resta aperta,
-    il proxy ci scrive lui quando serve, noi non dobbiamo fare nulla di attivo.
-
-    BUG FIX: il matchmaking lancia il proxy con subprocess.Popen(...), che ritorna SUBITO —
-    prima ancora che il proxy abbia finito di avviarsi e iniziato ad ascoltare sulla sua porta
-    TCP. Se ci proviamo nella minuscola finestra prima che sia pronto, la connessione viene
-    rifiutata. Ritentiamo per qualche secondo prima di arrenderci davvero, invece di fallire
-    al primo colpo."""
+    avvisati se cambia (il primary crasha, subentra il backup)"""
     deadline = time.time() + connect_timeout
     proxy_sock = None
     last_error = None
@@ -156,12 +131,6 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10):
                 print(f"[Network] Il primary e' cambiato (failover)! Mi riaggancio a "
                       f"{new_host}:{new_port} mantenendo lo stesso ID ({my_id}) e la STESSA "
                       f"porta locale — nessuna azione richiesta.")
-                # BUG FIX: creare un socket NUOVO qui (porta locale nuova, casuale) faceva
-                # rifiutare la richiesta come "non autorizzata" dal nuovo primary, perche' la
-                # sua lista expected_players (decisa dal matchmaking all'inizio, condivisa con
-                # il vecchio primary) valida i client per indirizzo — e la porta locale
-                # sarebbe cambiata. Non tocchiamo il socket: restiamo sulla STESSA porta di
-                # sempre, cambiamo solo a CHI mandiamo la richiesta di ingresso.
                 nm.host_ip = new_host
                 nm.host_port = new_port
                 nm.last_host_seen = time.time()
@@ -170,9 +139,7 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10):
     threading.Thread(target=_listen_for_failover, daemon=True).start()
 
 
-# ------------------------------------------------------------------
 # Lato server (usato da server/game_instance.py)
-# ------------------------------------------------------------------
 def start_dedicated_server(port, players_info):
     """Crea la NetworkManager per il server dedicato di una partita online: non e' MAI un
     giocatore, solo il punto di smistamento tra i client di quella partita.
@@ -183,4 +150,5 @@ def start_dedicated_server(port, players_info):
     nm = NetworkManager()
     nm.expected_players = {(ip, udp_port): pid for (pid, ip, udp_port) in players_info}
     nm.setup_host(port=port)
+    nm.start_heartbeat()
     return nm
