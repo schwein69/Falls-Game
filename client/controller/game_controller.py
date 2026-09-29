@@ -186,11 +186,6 @@ class GameController:
             print(f"[Game] Player {pid} Left")
             destroy(m.other_players[pid])
             del m.other_players[pid]
-        # BUG FIX: se la partita non e' ancora iniziata (siamo ancora in lobby), lasciare e'
-        # solo un cambio di elenco — non ha senso chiedere a game_authority "chi resta vivo".
-        # Prima questo controllo girava sempre, anche in lobby: se restava solo l'host, poteva
-        # concludere "nessuno e' vivo" e mostrare "Game Over" anche se la partita non era mai
-        # cominciata.
         if m.level_loaded and m.game_authority is not None:
             game_over, winner_pid = m.game_authority.remove_player(pid)
             if game_over and m.network_manager:
@@ -203,6 +198,8 @@ class GameController:
         print("[Game] Host started the game")
         m.lobby_open = False
         m.current_floor_seed = seed
+        if not m.network_manager.is_host:
+            m.host_player_id = 0
         self.load_level(seed)
 
     def rpc_game_pause(self, is_paused, pid=None):
@@ -457,39 +454,27 @@ class GameController:
             return
 
         if nm.host_alive():
-            if m.game_paused and getattr(m, 'host_pause_start', None) is not None:
-                m.game_paused = False
-                m.host_pause_start = None
-                for t in list(scene.entities):
-                    if hasattr(t, 'tag') and t.tag == 'pause_text':
-                        destroy(t)
-                print("[Game] L'host si e' fatto risentire in tempo, nessuna migrazione necessaria.")
             return
 
-        if not m.game_paused:
-            m.game_paused = True
-            m.host_pause_start = time.time()
-            Text("L'host non risponde, in attesa che si faccia risentire...", scale=1.5,
-                 origin=(0, 0), y=0.1, parent=camera.ui, tag='pause_text')
-            return
-
-        if time.time() - m.host_pause_start < REJOIN_TIMER:
-            return  # ancora dentro la finestra di grazia, aspettiamo
-
-        for t in list(scene.entities):
-            if hasattr(t, 'tag') and t.tag == 'pause_text':
-                destroy(t)
-        m.game_paused = False
-        m.host_pause_start = None
         m.migrating = True
-        print("[Game] Host non risponde da troppo tempo. Avvio la migrazione...")
+        print("[Game] Host non risponde. Avvio la migrazione...")
         self.handle_host_migration()
 
     def handle_host_migration(self):
         m = self.model
         old_nm = m.network_manager
         my_id = old_nm.player_id
-        survivor_ids = set(m.other_players.keys()) | {my_id}
+        dead_host_id = getattr(m, 'host_player_id', None)
+        survivor_ids = (set(m.other_players.keys()) - {dead_host_id}) | {my_id}
+
+        if len(survivor_ids) <= 1:
+            print(f"[Game] Nessun altro giocatore rimasto: la partita finisce qui.")
+            self.apply_game_won(my_id)
+            old_nm.stop()
+            m.network_manager = None
+            m.migrating = False
+            return
+
         new_host_id = min(survivor_ids)
 
         status = Text("Host perso: elezione in corso...", scale=1.2, origin=(0, 0), y=0.15,
@@ -504,6 +489,7 @@ class GameController:
 
             m.network_manager, m.game_authority, m.broadcaster = network_p2p.promote_to_host(
                 old_nm, m.current_floor_seed, destroyed_ids, positions, survivor_ids)
+            m.host_player_id = my_id
             print(f"[Game] Siamo il nuovo host (player {my_id}).")
             self.finish_migration(status)
         else:
@@ -514,9 +500,10 @@ class GameController:
         m = self.model
         hosts = listener.get_hosts()
         if hosts:
-            new_ip, _, new_port = hosts[0]
+            new_ip, new_host_pid, new_port = hosts[0]
             listener.stop()
             m.network_manager = network_p2p.reconnect_to_new_host(my_id, new_ip, new_port)
+            m.host_player_id = new_host_pid
             print(f"[Game] Nuovo host trovato: {new_ip}:{new_port}. Riconnesso.")
             self.finish_migration(status)
         elif attempts_left > 0:

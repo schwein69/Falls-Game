@@ -4,7 +4,7 @@ DASHBOARD_PORT = 8081              # Dashboard HTTP di sola lettura (porta 8080 
                                     # da altri servizi/processi di sistema su Windows)
 GAME_INSTANCE_BASE_PORT = 10000            # Starting port for game instances
 P2P_PORT = 12345                # Default P2P port for game instances
-MAX_PLAYERS = 2                  # Max players per game lobby
+MAX_PLAYERS = 3                  # Max players per game lobby
 SPAWN_HEIGHT = 45
 
 # Heartbeat settings (seconds)

@@ -17,6 +17,7 @@ class GameView:
 
     def display_error_message_screen(self, message, on_close_callback):
         self.clear_all_ui_elements()
+        mouse.locked = False
         msg = Text(message, scale=1.2, origin=(0, 0), position=(0, 0.1),
                    parent=camera.ui, color=color.red)
         btn = Button('Back', scale=(0.3, 0.1), position=(0, -0.1),
