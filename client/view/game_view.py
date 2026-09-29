@@ -53,11 +53,13 @@ class GameView:
         host_buttons = []
 
         def refresh_host_buttons():
-            if not listener.running:
+            if listener.bind_failed:
                 if not host_buttons or not isinstance(host_buttons[-1], Text):
                     msg = Text("Ricerca automatica non disponibile su questa macchina.",
                                y=0.15, scale=0.7, origin=(0, 0), parent=camera.ui)
                     host_buttons.append(msg)
+                return
+            if not listener.running:
                 return
             for b in host_buttons: destroy(b)
             host_buttons.clear()
@@ -67,11 +69,12 @@ class GameView:
                 msg = Text("No hosts found yet...", y=0.15, scale=0.8, parent=camera.ui)
                 host_buttons.append(msg)
             else:
-                for i, (ip, pid) in enumerate(hosts):
+                for i, (ip, pid, game_port) in enumerate(hosts):
                     btn = Button(
-                        text=f"Join Host ({ip})", scale=(0.4, 0.08),
+                        text=f"Join Host ({ip}:{game_port})", scale=(0.4, 0.08),
                         position=(0, 0.15 - i * 0.1), parent=camera.ui,
-                        on_click=Func(c.connect_to_p2p_host, lambda ip=ip: ip, listener)
+                        on_click=Func(c.connect_to_p2p_host, lambda ip=ip: ip,
+                                      lambda p=game_port: p, listener)
                     )
                     host_buttons.append(btn)
 

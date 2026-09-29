@@ -13,6 +13,7 @@ class NetworkManager:
         self.sock = None
         self.running = False
         self.player_id = None
+        self.join_rejected = None
         self.host_ip = None
         self.host_port = P2P_PORT
         self.is_host = False
@@ -49,9 +50,9 @@ class NetworkManager:
         self.match_in_progress = False
 
     def prepare_local_socket(self):
-        """Crea (se non esiste gia') il socket UDP locale e ne restituisce la porta assegnata.
+        """Crea il socket UDP locale e ne restituisce la porta assegnata.
         Usato in modalita' online per conoscere la nostra porta PRIMA di comunicarla al
-        matchmaking server"""
+        matchmaking server."""
         if self.sock is None:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(('', 0))
@@ -77,6 +78,22 @@ class NetworkManager:
         threading.Thread(target=self.receive_loop, daemon=True).start()
         msg = "JOIN_REQUEST" if rejoin_id is None else f"JOIN_REQUEST|{rejoin_id}"
         self.sock.sendto(msg.encode(), (self.host_ip, self.host_port))
+        self._retry_join_until_assigned(msg)
+
+    def _retry_join_until_assigned(self, msg, interval=0.5, max_seconds=15):
+        def _loop():
+            deadline = time.time() + max_seconds
+            while self.running and self.player_id is None and self.join_rejected is None \
+                    and time.time() < deadline:
+                time.sleep(interval)
+                if not self.running or self.player_id is not None or self.join_rejected is not None:
+                    return
+                try:
+                    self.sock.sendto(msg.encode(), (self.host_ip, self.host_port))
+                except Exception:
+                    return
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def setup_host(self, port=None, player_id=0):
         """Diventiamo host/server UDP. 'port' e' opzionale: se non specificato usa la porta P2P
@@ -96,10 +113,10 @@ class NetworkManager:
         threading.Thread(target=self.receive_loop, daemon=True).start()
         print(f"[Network] Host/server avviato sulla porta {bind_port} (player_id={player_id})")
 
-    # ================================
     # INVIO DATI
-    # ================================
     def send_rpc(self, method_name, *args):
+        """Da usare per mandare un RPC verso l'host/server (se siamo client) oppure verso tutti
+        i client registrati (se siamo host/server) con il NOSTRO id come mittente."""
         if self.player_id is None and not self.is_host:
             return
         data = {"method": method_name, "args": args, "sender_id": self.player_id}
@@ -176,7 +193,7 @@ class NetworkManager:
 
     def start_heartbeat(self, interval=HEARTBEAT_INTERVAL):
         """SOLO lato host: manda un piccolo segnale di vita a tutti i client a intervalli
-        regolari, cosi' possono accorgersi se l'host sparisce anche quando
+        regolari, cosi' possono accorgersi se l'host sparisce (vedi host_alive) anche quando
         non c'e' ancora nessuno stato di gioco da trasmettere (es. in lobby, prima che la
         partita inizi). Sullo STESSO intervallo, controlla anche se qualche CLIENT e' rimasto
         silenzioso troppo a lungo — vedi check_client_liveness."""
@@ -196,15 +213,10 @@ class NetworkManager:
         self._heartbeat_thread.start()
 
     def check_client_liveness(self, timeout=HEARTBEAT_TIMEOUT, grace_period=REJOIN_TIMER):
-        """SOLO lato host: rileva un client rimasto silenzioso (nessun pacchetto ricevuto da
-        lui, non un'uscita volontaria — quella arriva come DISCONNECT esplicito e viene gestita
-        subito, in modo immediato e separato). Se il silenzio supera 'timeout' secondi, mette
+        """SOLO lato host: rileva un client rimasto silenzioso 
+        Se il silenzio supera 'timeout' secondi, mette
         in pausa la partita per tutti e gli da' 'grace_period' secondi per farsi risentire
-        (basta che riprenda a mandare pacchetti dalla STESSA porta — non serve nessun
-        protocollo di rientro esplicito, un blip di rete si risolve da solo, vedi
-        on_receive_data). Se il tempo scade senza notizie, lo rimuove definitivamente."""
-
-  
+        Se il tempo scade senza notizie, lo rimuove definitivamente."""
         if not self.match_in_progress:
             return
         now = time.time()
@@ -244,6 +256,10 @@ class NetworkManager:
             try:
                 data, addr = self.sock.recvfrom(8192)
                 self.on_receive_data(data, addr)
+            except ConnectionResetError as e:
+                if self.running:
+                    print(f"[Network] Pacchetto UDP scartato (errore transitorio innocuo): {e}")
+                continue
             except Exception as e:
                 if self.running:
                     print(f"Errore nel receive loop: {e}")
@@ -255,7 +271,7 @@ class NetworkManager:
         try:
             msg = data_bytes.decode().strip()
 
-            if any(s in msg for s in ["JOIN_REQUEST", "ASSIGN_ID", "DISCONNECT"]):
+            if any(s in msg for s in ["JOIN_REQUEST", "ASSIGN_ID", "DISCONNECT", "ROOM_FULL"]):
                 self.handle_internal_messages(msg, addr)
                 return
 
@@ -308,7 +324,13 @@ class NetworkManager:
                         self.on_client_joined(migration_rejoin_id, addr)
                     return
 
-                if len(self.clients) < MAX_PLAYERS:
+                if addr in self.clients:
+                    my_port = self.sock.getsockname()[1]
+                    self.sock.sendto(f"ASSIGN_ID|{self.clients[addr]}|{my_port}".encode(), addr)
+                    return
+
+                total_players_if_accepted = len(self.clients) + 1 + (1 if self.host_is_player else 0)
+                if total_players_if_accepted <= MAX_PLAYERS:
                     if self.expected_players:
                         if addr not in self.expected_players:
                             print(f"[Host] Connessione non autorizzata rifiutata da {addr}")
@@ -333,6 +355,9 @@ class NetworkManager:
 
                     if self.on_client_joined:
                         self.on_client_joined(new_id, addr)
+                else:
+                    print(f"[Host] Stanza piena, connessione rifiutata da {addr}")
+                    self.sock.sendto(b"ROOM_FULL", addr)
 
             elif msg == "DISCONNECT":
                 if addr in self.clients:
@@ -349,6 +374,9 @@ class NetworkManager:
                 parts = msg.split('|')
                 self.player_id = int(parts[1])
                 print(f"[Network] Connesso con successo. Il mio ID: {self.player_id}")
+            elif msg == "ROOM_FULL":
+                self.join_rejected = "La stanza e' piena."
+                print(f"[Network] {self.join_rejected}")
 
     def process_queue(self, rpc_handler_func):
         while not self.msg_queue.empty():

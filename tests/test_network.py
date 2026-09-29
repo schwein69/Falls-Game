@@ -2,8 +2,10 @@ import sys
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
+import network
 from network import NetworkManager
 import network_p2p
 
@@ -20,9 +22,12 @@ def _collect_methods(nm, timeout=0.5):
 
 
 class TestMultiClientRoster(unittest.TestCase):
-    """Copre: 'avviare piu' istanze e vedere tutti i giocatori correttamente'."""
+    """Copre: 'avviare piu' istanze e vedere tutti i giocatori correttamente'.
+    Usa fino a 3 client + l'host = 4 partecipanti in un'unica partita"""
 
     def setUp(self):
+        self._max_players_patch = patch.object(network, "MAX_PLAYERS", 10)
+        self._max_players_patch.start()
         self.port = 19100 + (id(self) % 500)  # porta diversa per ogni test
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
@@ -33,6 +38,7 @@ class TestMultiClientRoster(unittest.TestCase):
         self.host.stop()
         for c in self.clients:
             c.stop()
+        self._max_players_patch.stop()
 
     def _join(self):
         c = NetworkManager()
@@ -84,9 +90,6 @@ class TestAntiSpoofing(unittest.TestCase):
         real_id = client.player_id
         fake_id = real_id + 99
 
-        # send_rpc() imposta SEMPRE "sender_id" al nostro vero player_id, quindi non basta per
-        # testare un pacchetto davvero falsificato — costruiamo il pacchetto a mano, bypassando
-        # l'API sicura, per verificare che sia la VALIDAZIONE DELL'HOST a bloccarlo.
         malicious = json.dumps({"method": "update_pos", "args": [fake_id, 1, 2, 3], "sender_id": fake_id})
         client.sock.sendto(malicious.encode(), (client.host_ip, client.host_port))
         time.sleep(0.2)
@@ -103,7 +106,12 @@ class TestHostMigration(unittest.TestCase):
     l'altro possa poi riconnettersi mantenendo lo stesso id."""
 
     def setUp(self):
+        self._max_players_patch = patch.object(network, "MAX_PLAYERS", 10)
+        self._max_players_patch.start()
         self.port = 19900 + (id(self) % 90)
+
+    def tearDown(self):
+        self._max_players_patch.stop()
 
     def test_promotion_keeps_identity_and_reconnect_gets_same_id(self):
         host = network_p2p.NetworkManager()
@@ -143,20 +151,13 @@ class TestHostMigration(unittest.TestCase):
             # c2 si ricollega chiedendo di riavere lo stesso id di prima.
             old_c2_id = c2.player_id
             c2.stop()
-            reconnected = network_p2p.reconnect_to_new_host(old_c2_id, "127.0.0.1")
-            # Nota: promote_to_host manda in ascolto sulla porta P2P fissa (config.P2P_PORT),
-            # non su self.port di questo test — per questo reconnect_to_new_host non riceve
-            # una porta esplicita, usa quella di default.
+            reconnected = network_p2p.reconnect_to_new_host(old_c2_id, "127.0.0.1", new_nm.host_port)
             time.sleep(0.3)
             self.assertEqual(reconnected.player_id, old_c2_id,
                               "chi si ricollega dopo la migrazione deve riavere lo stesso id")
             reconnected.stop()
         finally:
             new_nm.stop()
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestClientDisconnectPauseAndRejoin(unittest.TestCase):
@@ -287,3 +288,7 @@ class TestLobbyIsNotMistakenForDisconnect(unittest.TestCase):
         host.match_in_progress = True                         # partita iniziata
         host.check_client_liveness(timeout=5, grace_period=10)
         self.assertEqual(len(host.disconnected_clients), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
