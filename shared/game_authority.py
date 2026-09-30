@@ -13,20 +13,14 @@ class GameAuthority:
 
     # Vittoria: vince l'ultimo giocatore rimasto vivo
     def handle_player_died(self, pid):
-        """Un giocatore e' caduto/eliminato. Ritorna (partita_finita, vincitore_o_None) — vedi
-        _check_win per i dettagli."""
+        """Un giocatore e' caduto/eliminato. Ritorna (partita_finita, vincitore_o_None)"""
         self.known_players.add(pid)
         self.dead_players.add(pid)
         self.player_positions.pop(pid, None)
         return self._check_win()
 
     def _check_win(self):
-        """Ritorna (partita_finita: bool, vincitore: pid o None).
-
-        Un vincitore viene dichiarato solo se resta esattamente UN giocatore vivo tra ALMENO
-        due che hanno mai partecipato (l'ultimo-rimasto-vivo ha senso solo se c'era qualcun
-        altro con cui competere). Se non resta NESSUNO vivo — es. giocando DA SOLI, o per
-        coincidenza muoiono tutti — la partita finisce comunque, senza un vincitore specifico."""
+        """Ritorna (partita_finita: bool, vincitore: pid o None)."""
         if self.game_won:
             return False, None
         gone = self.dead_players | self.left_players

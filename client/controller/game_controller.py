@@ -33,6 +33,8 @@ class GameController:
             "start_game": self.rpc_start_game,
             "game_pause": self.rpc_game_pause,
             "host_left": self.rpc_host_left,
+            "player_ready": self.rpc_player_ready,
+            "start_countdown": self.rpc_start_countdown,
         }
 
     # RPC: giocatori, spawn, posizione
@@ -43,8 +45,10 @@ class GameController:
         if nm and pid != nm.player_id:
             m.connected_ids.add(pid)
 
-        if m.level_loaded:
-            if pid not in m.other_players and pid != nm.player_id:
+        if m.floors is not None and pid != nm.player_id:
+            if pid in m.other_players:
+                m.other_players[pid].position = Vec3(x, y, z)
+            else:
                 print(f"[Game] Spawning Remote Player {pid}")
                 new_p = RemotePlayer(position=Vec3(x, y, z), username=f"Player {pid}")
                 m.other_players[pid] = new_p
@@ -258,7 +262,84 @@ class GameController:
         camera.z = -5
         m.game_over = False
 
-        invoke(self.game_start, delay=0.1)
+        nm = m.network_manager
+        nm.send_rpc("spawn_player", nm.player_id, m.player.position.x, m.player.position.y,
+                    m.player.position.z)
+        for pid in m.connected_ids:
+            if pid not in m.other_players and pid != nm.player_id:
+                self.rpc_spawn_player(pid, 0, SPAWN_HEIGHT, 0)
+
+        if m.network_manager.is_host:
+            m.ready_pids = set()
+            m.expected_ready_count = len(m.connected_ids) + 1  # tutti i client + l'host stesso
+            m.countdown_started = False
+            invoke(self._countdown_safety_net, delay=10)
+
+        self._wait_for_ground_then_ready()
+
+    def _wait_for_ground_then_ready(self, attempts_left=40):
+        """Aspetta di avere davvero un collider sotto i piedi (un raggio verso il basso, non un
+        tempo indovinato) prima di segnalare 'pronto' all'host. Rete di sicurezza a ~2 secondi
+        (40 tentativi da 0.05s) se il collider proprio non si trova mai, per non restare
+        bloccati per sempre."""
+        m = self.model
+        if m.player is None:
+            return
+      
+        hit = raycast(m.player.world_position + Vec3(0, 0.5, 0), Vec3(0, -1, 0),
+                      distance=5, ignore=[m.player])
+        if hit.hit or attempts_left <= 0:
+            nm = m.network_manager
+            if nm.is_host:
+                self.rpc_player_ready(nm.player_id)
+            else:
+                nm.send_rpc("player_ready", nm.player_id)
+        else:
+            invoke(self._wait_for_ground_then_ready, attempts_left - 1, delay=0.05)
+
+    def rpc_player_ready(self, pid):
+        """SOLO host: registra che questo giocatore ha confermato il proprio pavimento ed e'
+        pronto. Quando tutti i giocatori attesi hanno segnalato, avviamo il conto alla rovescia
+        per tutti insieme."""
+        m = self.model
+        nm = m.network_manager
+        if not (nm and nm.is_host) or getattr(m, 'countdown_started', False):
+            return
+        m.ready_pids.add(pid)
+        print(f"[Game] Player {pid} pronto ({len(m.ready_pids)}/{m.expected_ready_count})")
+        if len(m.ready_pids) >= m.expected_ready_count:
+            m.countdown_started = True
+            nm.broadcast_rpc("start_countdown")
+            self.rpc_start_countdown()
+
+    def _countdown_safety_net(self):
+        """Se qualcuno non conferma mai di essere pronto (es. e' caduto in disconnessione
+        proprio mentre il livello si caricava), non restiamo bloccati in eterno ad aspettarlo:
+        dopo 10 secondi partiamo comunque con chi c'e'."""
+        m = self.model
+        nm = m.network_manager
+        if not (nm and nm.is_host) or getattr(m, 'countdown_started', False):
+            return
+        print("[Game] Non tutti pronti dopo 10s, avvio comunque (rete di sicurezza).")
+        m.countdown_started = True
+        nm.broadcast_rpc("start_countdown")
+        self.rpc_start_countdown()
+
+    def rpc_start_countdown(self):
+        """Ricevuto da TUTTI (host incluso, applicato localmente) nello stesso momento: mostra
+        3-2-1 e poi attiva la gravita' — cosi' si parte davvero insieme, non ognuno per conto
+        proprio dopo un tempo indovinato."""
+        self._countdown_tick(3)
+
+    def _countdown_tick(self, n):
+        for t in list(scene.entities):
+            if getattr(t, 'tag', None) == 'countdown_text':
+                destroy(t)
+        if n > 0:
+            Text(str(n), scale=4, origin=(0, 0), y=0.15, parent=camera.ui, tag='countdown_text')
+            invoke(self._countdown_tick, n - 1, delay=1.0)
+        else:
+            self.game_start()
 
     def game_start(self):
         m = self.model
@@ -266,15 +347,6 @@ class GameController:
         m.player.gravity = 1
         if m.network_manager:
             m.network_manager.match_in_progress = True
-
-        for pid in m.connected_ids:
-            if pid not in m.other_players and pid != m.network_manager.player_id:
-                self.rpc_spawn_player(pid, 0, SPAWN_HEIGHT, 0)
-
-        if m.network_manager:
-            p = m.player
-            m.network_manager.send_rpc("spawn_player", m.network_manager.player_id,
-                                        p.position.x, p.position.y, p.position.z)
 
     def reset_floor(self):
         m = self.model
@@ -517,7 +589,17 @@ class GameController:
 
     def finish_migration(self, status):
         destroy(status)
-        self.model.migrating = False
+        m = self.model
+        m.migrating = False
+        m.game_paused = False
+        for t in list(scene.entities):
+            if getattr(t, 'tag', None) == 'pause_text':
+                destroy(t)
+
+        if m.floors is not None:
+            for cube in m.floors.floor_cubes:
+                if cube.step_requested and not cube.has_activated and not cube.is_disappearing:
+                    cube.step_requested = False
 
     # Ciclo di gioco (chiamato da main.py ogni frame)
     def update(self):

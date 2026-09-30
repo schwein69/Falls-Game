@@ -1,6 +1,8 @@
 import sys
 import os
 import time
+import socket
+import json
 import unittest
 from unittest.mock import patch
 
@@ -23,7 +25,10 @@ def _collect_methods(nm, timeout=0.5):
 
 class TestMultiClientRoster(unittest.TestCase):
     """Copre: 'avviare piu' istanze e vedere tutti i giocatori correttamente'.
-    Usa fino a 3 client + l'host = 4 partecipanti in un'unica partita"""
+
+    Usa fino a 3 client + l'host = 4 partecipanti in un'unica partita: piu' del vero
+    MAX_PLAYERS di gioco (2), quindi qui lo alziamo SOLO per questa classe di test, senza
+    toccare config.py (che resta a 2, il valore vero usato in partita)."""
 
     def setUp(self):
         self._max_players_patch = patch.object(network, "MAX_PLAYERS", 10)
@@ -103,7 +108,10 @@ class TestAntiSpoofing(unittest.TestCase):
 class TestHostMigration(unittest.TestCase):
     """Copre: 'testare la migrazione dell'host'. Simula host + 2 client, uccide l'host, e
     verifica che il sopravvissuto con id piu' basso possa promuoversi correttamente e che
-    l'altro possa poi riconnettersi mantenendo lo stesso id."""
+    l'altro possa poi riconnettersi mantenendo lo stesso id.
+
+    Host + 2 client = 3 partecipanti: piu' del vero MAX_PLAYERS di gioco (2), quindi lo
+    alziamo SOLO per questa classe, senza toccare config.py."""
 
     def setUp(self):
         self._max_players_patch = patch.object(network, "MAX_PLAYERS", 10)
@@ -224,10 +232,9 @@ class TestClientDisconnectPauseAndRejoin(unittest.TestCase):
 
 
 class TestJoinReliability(unittest.TestCase):
-    """Regressioni trovate misurando la catena Online reale: il JOIN_REQUEST UDP veniva mandato
-    UNA volta sola. In Online il proxy e' pronto (TCP) prima che il processo primary abbia
-    legato la sua porta UDP: se il pacchetto arrivava in quella finestra andava perso e il
-    client restava senza id per sempre."""
+    """Regressioni trovate misurando la catena Online reale, e poi il passaggio a un handshake
+    TCP dedicato per l'ingresso (vedi network.py: setup_host apre anche un socket TCP sulla
+    stessa porta, solo per assegnare gli id in modo affidabile — il gioco vero resta su UDP)."""
 
     def setUp(self):
         self.port = 19400 + (id(self) % 200)
@@ -242,7 +249,7 @@ class TestJoinReliability(unittest.TestCase):
 
     def test_client_joins_even_if_server_starts_late(self):
         self.client = NetworkManager()
-        self.client.join_network("127.0.0.1", self.port)   # server ancora spento: primo pacchetto perso
+        self.client.join_network("127.0.0.1", self.port)   # server ancora spento: il primo CONNECT fallisce
         time.sleep(1.0)
         self.server = NetworkManager()
         self.server.setup_host(port=self.port)              # parte in ritardo
@@ -250,24 +257,34 @@ class TestJoinReliability(unittest.TestCase):
         while self.client.player_id is None and time.time() < deadline:
             time.sleep(0.1)
         self.assertIsNotNone(self.client.player_id,
-                             "il client doveva ritentare il JOIN e ottenere un id")
+                             "il client doveva ritentare il CONNECT TCP e ottenere un id")
 
-    def test_join_retries_never_create_phantom_players(self):
-        """In P2P l'id e' len(clients)+1: senza idempotenza ogni ritentativo creerebbe un
-        giocatore in piu'."""
+    def test_repeated_join_from_same_address_is_idempotent(self):
+        """L'handshake TCP di per se' non perde risposte (a differenza del vecchio UDP), ma
+        deve restare idempotente lo stesso: se per qualunque motivo arrivano piu' richieste
+        dallo stesso indirizzo UDP (stesso ip, stessa porta), l'host deve rimandare sempre lo
+        STESSO id, non registrarne uno nuovo ogni volta."""
         self.server = NetworkManager()
         self.server.setup_host(port=self.port)
         self.client = NetworkManager()
         self.client.join_network("127.0.0.1", self.port)
         time.sleep(0.3)
-        # duplicati espliciti dallo STESSO indirizzo, come farebbe il ritentativo
-        for _ in range(4):
-            self.client.sock.sendto(b"JOIN_REQUEST", ("127.0.0.1", self.port))
-            time.sleep(0.05)
-        time.sleep(0.5)
+        first_id = self.client.player_id
+        self.assertIsNotNone(first_id)
+
+        # Una seconda richiesta di ingresso, esplicita, dallo STESSO indirizzo UDP del client
+        # gia' connesso — come farebbe un ritentativo capitato per sbaglio due volte.
+        my_udp_port = self.client.sock.getsockname()[1]
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.settimeout(3)
+            tcp.connect(("127.0.0.1", self.port))
+            tcp.sendall(json.dumps({"udp_port": my_udp_port, "rejoin_id": None}).encode())
+            resp = json.loads(tcp.recv(1024).decode())
+
+        self.assertEqual(resp["id"], first_id,
+                         "una richiesta ripetuta dallo stesso indirizzo deve riavere lo stesso id")
         self.assertEqual(len(self.server.clients), 1,
-                         "i JOIN_REQUEST duplicati non devono registrare giocatori in piu'")
-        self.assertEqual(self.client.player_id, 1)
+                         "non deve registrare un giocatore in piu' per lo stesso indirizzo")
 
 
 class TestLobbyIsNotMistakenForDisconnect(unittest.TestCase):

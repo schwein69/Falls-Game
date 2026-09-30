@@ -42,7 +42,7 @@ def start_p2p_host():
 
 
 def join_p2p_host(ip, port):
-    """Ci uniamo come client a un host P2P (scoperto via LAN o inserito manualmente).
+    """Ci uniamo come client a un host P2P.
     'port' e' quella su cui QUELL'host specifico e' davvero in ascolto — puo' non essere
     P2P_PORT se e' stato ospitato dopo un altro sullo stesso PC (vedi start_p2p_host). Non c'e'
     nessuna GameAuthority da creare: siamo un giocatore normale, gli eventi di autorita' ci
@@ -89,7 +89,7 @@ def promote_to_host(old_network_manager, floor_seed, destroyed_blocks, player_po
 
 
 def reconnect_to_new_host(my_id, new_host_ip, new_host_port):
-    """Un sopravvissuto (non eletto) si ricollega al nuovo host trovato sulla LAN, chiedendo di
+    """Un sopravvissuto si ricollega al nuovo host trovato sulla LAN, chiedendo di
     riottenere lo stesso player_id di prima (vedi join_network(..., rejoin_id=...)).
     'new_host_port' viene dalla discovery (listener.get_hosts()), non e' per forza P2P_PORT —
     il nuovo host potrebbe aver dovuto usare una porta alternativa."""
