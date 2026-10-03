@@ -1,9 +1,11 @@
+import sys
 import socket
 import threading
 import queue
 import json
 import time
 from config import P2P_PORT, MAX_PLAYERS, SPAWN_HEIGHT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, REJOIN_TIMER
+
 
 class NetworkManager:
     
@@ -21,6 +23,7 @@ class NetworkManager:
 
         # Client connessi. (ip, porta) -> player_id
         self.clients = {}
+      
         self.next_client_id = 1
 
       
@@ -61,17 +64,7 @@ class NetworkManager:
         return self.sock.getsockname()[1]
 
     def join_network(self, ip, port, rejoin_id=None):
-        """Ci uniamo come client a un host (P2P locale oppure server online dedicato).
-
-        rejoin_id: usato SOLO durante una migrazione dell'host (vedi network_p2p.py). Se
-        valorizzato, segnaliamo al nuovo host "ero gia' il giocatore X, ridammi lo stesso id"
-        invece di farci assegnare un id nuovo di zecca — fondamentale perche' gli altri
-        sopravvissuti ci conoscono gia' con quell'id.
-
-        L'ingresso vero e proprio passa da una connessione TCP dedicata (_tcp_join_handshake):
-        apriamo il nostro socket UDP di gioco SUBITO (ci serve la porta per dirla all'host), ma
-        l'id ce lo diciamo con TCP, che garantisce la consegna senza bisogno di ritentare a
-        mano un pacchetto che potrebbe perdersi."""
+        """Ci uniamo come client a un host (P2P locale oppure server online dedicato)."""
         self.is_host = False
         self.host_ip = ip
         self.host_port = port
@@ -125,10 +118,19 @@ class NetworkManager:
 
     def setup_host(self, port=None, player_id=0):
         """Diventiamo host/server. 'port' e' opzionale: se non specificato usa la porta P2P
-        fissa. Il server online dedicato passa invece la
+        fissa (config.P2P_PORT, caso P2P locale). Il server online dedicato passa invece la
         porta assegnata dinamicamente dal matchmaking server.
 
-        Apriamo DUE socket sulla STESSA porta: uno UDP e uno TCP."""
+        Apriamo DUE socket sulla STESSA porta: uno UDP (il gioco vero — posizioni, blocchi,
+        tutto cio' che deve arrivare veloce e per cui un pacchetto perso ogni tanto non e' un
+        problema) e uno TCP (solo per l'ingresso — vedi _accept_join_loop). L'ingresso e' raro
+        e deve essere affidabile (un id perso per strada e' un giocatore bloccato), il gioco e'
+        frequente e deve essere veloce (TCP, se un pacchetto si perde, blocca tutto cio' che
+        viene dopo finche' non lo rispedisce — inaccettabile per 20 aggiornamenti al secondo).
+
+        player_id di default e' 0 (il primo host di una partita nuova). Durante una migrazione
+        dell'host (vedi network_p2p.promote_to_host) il client promosso passa il PROPRIO id
+        gia' esistente, per non cambiare identita' a meta' partita."""
         self.is_host = True
         bind_port = port if port is not None else P2P_PORT
 
@@ -161,7 +163,8 @@ class NetworkManager:
 
     def _accept_join_loop(self):
         """SOLO host: accetta connessioni TCP in ingresso, una alla volta, e delega ognuna a
-        un thread separato (_handle_join_connection)."""
+        un thread separato (_handle_join_connection) — cosi' un client lento o bloccato non
+        rallenta gli altri che stanno provando a entrare nello stesso momento."""
         while self.running:
             try:
                 conn, addr = self.join_tcp_sock.accept()
@@ -300,7 +303,7 @@ class NetworkManager:
                     self.sock.sendto(raw, addr)
 
     def start_broadcast_tick(self, get_payload_fn, method_name="state_snapshot", interval=0.05):
-        """Avvia un thread che, a intervalli fissi, chiede a get_payload_fn()
+        """Avvia (se non gia' avviato) un thread che, a intervalli fissi, chiede a get_payload_fn()
         lo stato corrente e lo trasmette a tutti i client con broadcast_rpc. E' cosi' che
         l'autorita' (host P2P o server online) ridistribuisce le posizioni: a cadenza fissa,
         invece che ad ogni singolo pacchetto ricevuto da ogni singolo client."""
@@ -341,13 +344,18 @@ class NetworkManager:
         self._heartbeat_thread.start()
 
     def check_client_liveness(self, timeout=HEARTBEAT_TIMEOUT, grace_period=REJOIN_TIMER):
-        """SOLO lato host: rileva un client rimasto silenzioso.
-        Se il silenzio supera 'timeout' secondi, mette
+        """SOLO lato host: rileva un client rimasto silenzioso (nessun pacchetto ricevuto da
+        lui, non un'uscita volontaria — quella arriva come DISCONNECT esplicito e viene gestita
+        subito, in modo immediato e separato). Se il silenzio supera 'timeout' secondi, mette
         in pausa la partita per tutti e gli da' 'grace_period' secondi per farsi risentire
         (basta che riprenda a mandare pacchetti dalla STESSA porta — non serve nessun
         protocollo di rientro esplicito, un blip di rete si risolve da solo, vedi
         on_receive_data). Se il tempo scade senza notizie, lo rimuove definitivamente.
-        """
+
+        BUG FIX: prima girava fin da subito, anche mentre si e' ancora in lobby — dove un
+        client non manda MAI nulla (niente da sincronizzare finche' non parte la partita),
+        quindi veniva marcato "disconnesso" a torto anche restando semplicemente in attesa.
+        Ora non fa nulla finche' match_in_progress non e' True."""
         if not self.match_in_progress:
             return
         now = time.time()
@@ -381,7 +389,9 @@ class NetworkManager:
             return True
         return (time.time() - self.last_host_seen) < timeout
 
+    # ================================
     # RICEZIONE DATI
+    # ================================
     def receive_loop(self):
         while self.running:
             try:
@@ -398,7 +408,6 @@ class NetworkManager:
 
     def on_receive_data(self, data_bytes, addr):
         if not self.is_host:
-            # Siamo client
             self.last_host_seen = time.time()
         try:
             msg = data_bytes.decode().strip()
@@ -408,9 +417,13 @@ class NetworkManager:
                 return
 
             payload = json.loads(msg)
+         
+            if not self.is_host and payload.get("method") == "host_heartbeat":
+                self.send_rpc("client_heartbeat")
 
             if self.is_host:
-                # Validazione anti-spoofing.
+                # Validazione anti-spoofing: il mittente deve essere davvero il giocatore che
+                # dichiara di essere.
                 claimed_pid = payload.get("sender_id")
                 real_pid = self.clients.get(addr)
                 if real_pid is None or claimed_pid != real_pid:

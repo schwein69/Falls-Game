@@ -1,17 +1,9 @@
-"""
-Contiene le DUE meta' della stessa architettura:
-  - start_online_session()   -> lato CLIENT: handshake col matchmaking, poi connessione al
-                                 server dedicato assegnato.
-  - start_dedicated_server() -> lato SERVER: usato da server/game_instance.py per mettersi in
-                                 ascolto sulla porta decisa dal matchmaking, pre-autorizzando
-                                 solo i giocatori di quella partita.
-"""
-
 import socket
 import json
 import random
 import threading
 import time
+import os
 
 from network import NetworkManager
 from config import MATCHMAKING_HOSTNAME, MATCHMAKING_TCP_PORT
@@ -42,7 +34,7 @@ def _matchmaking_handshake(nm):
     """
     try:
         local_udp_port = nm.prepare_local_socket()
-        my_label = random.randint(1, 999999)
+        my_label = os.getpid() * 1_000_000 + random.randint(0, 999_999)
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
             tcp.settimeout(15)
@@ -78,12 +70,22 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10):
     avvisati se cambia (il primary crasha, subentra il backup)"""
     deadline = time.time() + connect_timeout
     proxy_sock = None
+    info = None
     last_error = None
     while time.time() < deadline:
         try:
             proxy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             proxy_sock.settimeout(2)
             proxy_sock.connect((proxy_host, proxy_port))
+
+            buf = b""
+            while b"\n" not in buf:
+                chunk = proxy_sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("Il proxy ha chiuso la connessione.")
+                buf += chunk
+            line, _ = buf.split(b"\n", 1)
+            info = json.loads(line.decode())
             break
         except Exception as e:
             last_error = e
@@ -94,7 +96,7 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10):
             proxy_sock = None
             time.sleep(0.3)
 
-    if proxy_sock is None:
+    if proxy_sock is None or info is None:
         raise ConnectionError(f"Impossibile connettersi al proxy dopo {connect_timeout}s: {last_error}")
 
     nm.proxy_sock = proxy_sock  # teniamo un riferimento: serve anche per chiuderla in stop()
@@ -111,8 +113,8 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10):
         line, buf = buf.split(b"\n", 1)
         return json.loads(line.decode())
 
-    # Primo messaggio del proxy: l'indirizzo del primary ATTUALE.
-    info = _read_line()
+    # L'indirizzo del primary ATTUALE l'abbiamo gia' letto qui sopra, dentro il ciclo di
+    # ritentativo — _read_line() da qui in poi serve solo per i FUTURI avvisi di failover.
     primary_host, primary_port = info["primary_host"], info["primary_port"]
     print(f"[Network] Il proxy indica il primary su {primary_host}:{primary_port}. Mi unisco.")
     proxy_sock.settimeout(None)
@@ -131,10 +133,8 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10):
                 print(f"[Network] Il primary e' cambiato (failover)! Mi riaggancio a "
                       f"{new_host}:{new_port} mantenendo lo stesso ID ({my_id}) e la STESSA "
                       f"porta locale — nessuna azione richiesta.")
-                nm.host_ip = new_host
-                nm.host_port = new_port
                 nm.last_host_seen = time.time()
-                nm.sock.sendto(f"JOIN_REQUEST|{my_id}".encode(), (new_host, new_port))
+                nm.join_network(new_host, new_port, rejoin_id=my_id)
 
     threading.Thread(target=_listen_for_failover, daemon=True).start()
 

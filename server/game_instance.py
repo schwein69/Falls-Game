@@ -13,14 +13,14 @@ from game_authority import GameAuthority
 from config import LOG_PREFIX
 
 JOIN_TIMEOUT_SECONDS = 30
-IDLE_SHUTDOWN_SECONDS = 5
+IDLE_SHUTDOWN_SECONDS = 3
 STATUS_POLL_INTERVAL = 0.1
 SNAPSHOT_INTERVAL = 0.05       # 20 Hz: cadenza con cui ridistribuiamo le posizioni ai client
 REPLICATION_INTERVAL = 0.2     # 5 Hz: cadenza con cui il primary replica lo stato al backup
 
 
-# Gestione RPC dei client 
-def make_rpc_handler(nm, authority):
+# Gestione RPC dei client
+def make_rpc_handler(nm, authority, ready_state):
     def handle(payload):
         method = payload.get("method")
         args = payload.get("args", [])
@@ -28,6 +28,18 @@ def make_rpc_handler(nm, authority):
         if method == "update_pos":
             pid, x, y, z = args
             authority.handle_update_pos(pid, x, y, z)
+
+        elif method == "player_ready":
+            if ready_state["countdown_started"]:
+                return
+            pid = args[0]
+            ready_state["ready_pids"].add(pid)
+            print(f"{LOG_PREFIX} Player {pid} pronto "
+                  f"({len(ready_state['ready_pids'])}/{ready_state['expected_count']})")
+            if len(ready_state["ready_pids"]) >= ready_state["expected_count"]:
+                ready_state["countdown_started"] = True
+                nm.match_in_progress = True
+                nm.broadcast_rpc("start_countdown")
 
         elif method == "block_step":
             pid, block_id = args
@@ -62,7 +74,8 @@ def run_as_active_server(port, players_info, authority, log_tag):
     print(f"{LOG_PREFIX}{log_tag} Avviato. Seed pavimento: {authority.floor_seed}. "
           f"Attendo {expected_count} giocatori: {players_info}")
 
-    rpc_handler = make_rpc_handler(nm, authority)
+    ready_state = {"ready_pids": set(), "countdown_started": False, "expected_count": expected_count}
+    rpc_handler = make_rpc_handler(nm, authority, ready_state)
 
     start_wait = time.time()
     while len(nm.clients) < expected_count:
@@ -78,15 +91,32 @@ def run_as_active_server(port, players_info, authority, log_tag):
         nm.stop()
         return
 
+    ready_state["expected_count"] = len(nm.clients)
     print(f"{LOG_PREFIX}{log_tag} {len(nm.clients)} giocatori connessi. Via!")
     nm.broadcast_rpc("start_game", authority.floor_seed)
-    nm.match_in_progress = True
     nm.start_broadcast_tick(authority.snapshot_payload, interval=SNAPSHOT_INTERVAL)
+
+  
+    if (not ready_state["countdown_started"]
+            and len(ready_state["ready_pids"]) >= ready_state["expected_count"]):
+        ready_state["countdown_started"] = True
+        nm.match_in_progress = True
+        nm.broadcast_rpc("start_countdown")
+
+   
+    READY_SAFETY_NET_SECONDS = 10
+    countdown_deadline = time.time() + READY_SAFETY_NET_SECONDS
 
     last_seen_player_time = time.time()
     try:
         while True:
             nm.process_queue(rpc_handler)
+            if not ready_state["countdown_started"] and time.time() > countdown_deadline:
+                print(f"{LOG_PREFIX}{log_tag} Non tutti pronti dopo {READY_SAFETY_NET_SECONDS}s, "
+                      f"avvio comunque (rete di sicurezza).")
+                ready_state["countdown_started"] = True
+                nm.match_in_progress = True
+                nm.broadcast_rpc("start_countdown")
             time.sleep(STATUS_POLL_INTERVAL)
             if len(nm.clients) > 0:
                 last_seen_player_time = time.time()
@@ -99,11 +129,9 @@ def run_as_active_server(port, players_info, authority, log_tag):
         nm.stop()
 
 
-# ------------------------------------------------------------------
 # Ruolo PRIMARY
-# ------------------------------------------------------------------
 def replicate_to_backup(get_state_fn, backup_replica_port, interval=REPLICATION_INTERVAL):
-    """SOLO primary: prova a connettersi al backup  e gli manda
+    """SOLO primary: prova a connettersi al backup (riprovando finche' non e' su) e gli manda
     una copia dello stato (GameAuthority.to_dict()) a intervalli regolari, una riga JSON alla
     volta. E' un semplice canale "push": il primary parla, il backup ascolta e basta."""
     def _loop():
@@ -143,10 +171,12 @@ def run_primary(port, control_port, replica_port, players_info):
 
 # Ruolo BACKUP
 def run_backup(port, control_port, replica_port, players_info):
-    latest_state = {"value": None}  
+    latest_state = {"value": None}  # dict-wrapper: modificabile dai thread senza "nonlocal"
 
     def _replica_receiver():
-        """Ascolta la connessione TCP dal primary e tiene aggiornato l'ultimo stato ricevuto."""
+        """Ascolta la connessione TCP dal primary e tiene aggiornato l'ultimo stato ricevuto.
+        Non fa NULLA con quello stato finche' non arriva l'ordine di promozione — un backup
+        passivo, appunto: osserva, non agisce."""
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("", replica_port))

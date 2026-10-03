@@ -20,14 +20,13 @@ def _bind_to_first_free_port(nm, player_id=0):
 
 
 def start_p2p_host():
-    """Diventiamo host di una partita P2P locale: siamo noi il punto di smistamento E un
-    giocatore. Ritorna (network_manager, game_authority, broadcaster)."""
+    """Diventiamo host di una partita P2P locale. Ritorna (network_manager, game_authority, broadcaster)."""
     nm = NetworkManager()
     nm.allow_host_migration = True
     bound_port = _bind_to_first_free_port(nm)
     if bound_port is None:
         return nm, None, None
-    nm.host_is_player = True  # l'host P2P e' anche un giocatore vero, a differenza del server online
+    nm.host_is_player = True  
 
     authority = GameAuthority()
     nm.on_client_joined = lambda pid, addr: nm.send_to(
@@ -42,11 +41,7 @@ def start_p2p_host():
 
 
 def join_p2p_host(ip, port):
-    """Ci uniamo come client a un host P2P.
-    'port' e' quella su cui QUELL'host specifico e' davvero in ascolto — puo' non essere
-    P2P_PORT se e' stato ospitato dopo un altro sullo stesso PC (vedi start_p2p_host). Non c'e'
-    nessuna GameAuthority da creare: siamo un giocatore normale, gli eventi di autorita' ci
-    arrivano dall'host via rete come per chiunque altro."""
+    """Ci uniamo come client a un host P2P."""
     nm = NetworkManager()
     nm.allow_host_migration = True
     nm.join_network(ip, port)
@@ -57,8 +52,7 @@ def join_p2p_host(ip, port):
 def promote_to_host(old_network_manager, floor_seed, destroyed_blocks, player_positions, survivor_ids):
     """Un client normale diventa il nuovo host dopo che il vecchio e' sparito.
     Ricostruisce lo stato di gioco (seed del pavimento, blocchi gia' distrutti, posizioni note)
-    a partire da quello che QUESTO client aveva gia' visto prima che l'host sparisse: e' un
-    "best effort", non un travaso perfetto.
+    a partire da quello che QUESTO client aveva gia' visto prima che l'host sparisse.
     Ritorna (network_manager, game_authority, broadcaster), stessa forma di start_p2p_host."""
     my_id = old_network_manager.player_id
     old_network_manager.stop()
@@ -91,7 +85,7 @@ def promote_to_host(old_network_manager, floor_seed, destroyed_blocks, player_po
 def reconnect_to_new_host(my_id, new_host_ip, new_host_port):
     """Un sopravvissuto si ricollega al nuovo host trovato sulla LAN, chiedendo di
     riottenere lo stesso player_id di prima (vedi join_network(..., rejoin_id=...)).
-    'new_host_port' viene dalla discovery (listener.get_hosts()), non e' per forza P2P_PORT —
+    'new_host_port' viene dalla discovery (listener.get_hosts()), 
     il nuovo host potrebbe aver dovuto usare una porta alternativa."""
     nm = NetworkManager()
     nm.allow_host_migration = True

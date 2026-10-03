@@ -2,15 +2,12 @@ import os
 import time
 from ursina import *
 
-from config import SPAWN_HEIGHT, REJOIN_TIMER
+from config import SPAWN_HEIGHT
 from player import Player, RemotePlayer
 from floor import Floor, FloorCube, FLOOR_COUNT, FLOOR_HEIGHT, apply_floor_seed
 from usefulFunctions import get_random_position
-from network import NetworkManager
-from network_discovery import DiscoveryBroadcaster, DiscoveryListener
 import network_p2p
 import network_online
-from game_authority import GameAuthority
 
 
 class GameController:
@@ -45,6 +42,7 @@ class GameController:
         if nm and pid != nm.player_id:
             m.connected_ids.add(pid)
 
+       
         if m.floors is not None and pid != nm.player_id:
             if pid in m.other_players:
                 m.other_players[pid].position = Vec3(x, y, z)
@@ -207,15 +205,18 @@ class GameController:
         self.load_level(seed)
 
     def rpc_game_pause(self, is_paused, pid=None):
-        self.model.game_paused = is_paused
+        m = self.model
+        m.game_paused = is_paused
         if is_paused:
+            if m.player is not None:
+                m.player.gravity = 0
             Text(f"Waiting for Player {pid} to reconnect...", scale=1.5, origin=(0, 0), y=0.1,
                  parent=camera.ui, tag='pause_text')
         else:
+            if m.player is not None:
+                m.player.gravity = 1
             print("[Game] RESUMED!")
-            for t in scene.entities:
-                if hasattr(t, 'tag') and t.tag == 'pause_text':
-                    destroy(t)
+            self._destroy_tagged('pause_text')
 
     def rpc_host_left(self):
         print("[Game] L'host ha chiuso la partita.")
@@ -239,6 +240,28 @@ class GameController:
         else:
             nm.send_rpc("block_step", nm.player_id, block_id)
 
+    # Utilita' condivise
+    def _destroy_tagged(self, tag):
+        """Distrugge tutte le entita' a schermo con un certo tag — usato per i vari messaggi
+        temporanei (pausa, conto alla rovescia, connessione in corso...) che devono sparire
+        esattamente quando la situazione che rappresentano finisce, da qualunque punto del
+        codice finisca."""
+        for t in list(scene.entities):
+            if getattr(t, 'tag', None) == tag:
+                destroy(t)
+
+    def _leave_network(self):
+        """Chiude la connessione di rete corrente, avvisando prima gli altri se eravamo noi
+        l'host (vedi rpc_host_left) — usato sia da reset_floor (fine partita) sia da
+        leave_lobby (uscita prima che la partita inizi): stessa identica sequenza in entrambi
+        i casi, prima duplicata in due punti."""
+        m = self.model
+        if m.network_manager:
+            if m.network_manager.is_host:
+                m.network_manager.broadcast_rpc("host_left")
+            m.network_manager.stop()
+            m.network_manager = None
+
     # Ciclo di vita della partita
     def load_level(self, floor_seed=None):
         m = self.model
@@ -256,7 +279,7 @@ class GameController:
                 cube.collider = "box"
                 cube.collider_added = True
 
-        start_pos = get_random_position()
+        start_pos = get_random_position() + Vec3(0, 10, 0)
         m.player = Player(start_pos, f"Player {m.network_manager.player_id}")
         m.player.gravity = 0
         camera.z = -5
@@ -269,9 +292,10 @@ class GameController:
             if pid not in m.other_players and pid != nm.player_id:
                 self.rpc_spawn_player(pid, 0, SPAWN_HEIGHT, 0)
 
+      
         if m.network_manager.is_host:
             m.ready_pids = set()
-            m.expected_ready_count = len(m.connected_ids) + 1  # tutti i client + l'host stesso
+            m.expected_ready_count = len(m.network_manager.clients) + 1  # tutti i client + l'host stesso
             m.countdown_started = False
             invoke(self._countdown_safety_net, delay=10)
 
@@ -285,9 +309,8 @@ class GameController:
         m = self.model
         if m.player is None:
             return
-      
         hit = raycast(m.player.world_position + Vec3(0, 0.5, 0), Vec3(0, -1, 0),
-                      distance=5, ignore=[m.player])
+                      distance=20, ignore=[m.player])
         if hit.hit or attempts_left <= 0:
             nm = m.network_manager
             if nm.is_host:
@@ -296,6 +319,13 @@ class GameController:
                 nm.send_rpc("player_ready", nm.player_id)
         else:
             invoke(self._wait_for_ground_then_ready, attempts_left - 1, delay=0.05)
+
+    def _begin_countdown(self):
+        """Fa partire davvero il conto alla rovescia condiviso: segna che e' partito."""
+        m = self.model
+        m.countdown_started = True
+        m.network_manager.broadcast_rpc("start_countdown")
+        self.rpc_start_countdown()
 
     def rpc_player_ready(self, pid):
         """SOLO host: registra che questo giocatore ha confermato il proprio pavimento ed e'
@@ -308,9 +338,7 @@ class GameController:
         m.ready_pids.add(pid)
         print(f"[Game] Player {pid} pronto ({len(m.ready_pids)}/{m.expected_ready_count})")
         if len(m.ready_pids) >= m.expected_ready_count:
-            m.countdown_started = True
-            nm.broadcast_rpc("start_countdown")
-            self.rpc_start_countdown()
+            self._begin_countdown()
 
     def _countdown_safety_net(self):
         """Se qualcuno non conferma mai di essere pronto (es. e' caduto in disconnessione
@@ -321,9 +349,7 @@ class GameController:
         if not (nm and nm.is_host) or getattr(m, 'countdown_started', False):
             return
         print("[Game] Non tutti pronti dopo 10s, avvio comunque (rete di sicurezza).")
-        m.countdown_started = True
-        nm.broadcast_rpc("start_countdown")
-        self.rpc_start_countdown()
+        self._begin_countdown()
 
     def rpc_start_countdown(self):
         """Ricevuto da TUTTI (host incluso, applicato localmente) nello stesso momento: mostra
@@ -332,9 +358,7 @@ class GameController:
         self._countdown_tick(3)
 
     def _countdown_tick(self, n):
-        for t in list(scene.entities):
-            if getattr(t, 'tag', None) == 'countdown_text':
-                destroy(t)
+        self._destroy_tagged('countdown_text')
         if n > 0:
             Text(str(n), scale=4, origin=(0, 0), y=0.15, parent=camera.ui, tag='countdown_text')
             invoke(self._countdown_tick, n - 1, delay=1.0)
@@ -366,11 +390,7 @@ class GameController:
         m.level_loaded = False
         m.game_over = False
 
-        if m.network_manager is not None:
-            if m.network_manager.is_host:
-                m.network_manager.broadcast_rpc("host_left")
-            m.network_manager.stop()
-            m.network_manager = None
+        self._leave_network()
         m.game_authority = None
         if m.broadcaster is not None:
             m.broadcaster.stop()
@@ -403,8 +423,7 @@ class GameController:
         invoke(self.scan_lan_for_hosts, delay=0.5)
 
     def scan_lan_for_hosts(self):
-        listener = DiscoveryListener()
-        listener.start()
+        listener = network_p2p.start_host_discovery_scan()
         self.model.current_listener = listener
         self.view.show_lan_host_scan_screen(listener)
 
@@ -429,33 +448,29 @@ class GameController:
             return
         invoke(self.poll_p2p_join_outcome, m.network_manager, time.time(), delay=0.2)
 
+    def _fail_p2p_join(self, nm, message):
+        """Le due uscite di poll_p2p_join_outcome che falliscono (rifiuto esplicito, o nessuna
+        risposta entro il timeout) facevano la stessa identica sequenza di pulizia — raccolta
+        qui una volta sola."""
+        self._destroy_tagged('p2p_connecting_text')
+        nm.stop()
+        self.model.network_manager = None
+        self.view.display_error_message_screen(message, self.view.show_local_mode_menu)
+
     def poll_p2p_join_outcome(self, nm, started_at, timeout=15):
         m = self.model
         if m.network_manager is not nm:
             return  # nel frattempo si e' tornati al menu: questa connessione non e' piu' attiva
 
-        def _clear_connecting_text():
-            for t in list(scene.entities):
-                if getattr(t, 'tag', None) == 'p2p_connecting_text':
-                    destroy(t)
-                    break
-
         if nm.player_id is not None:
-            _clear_connecting_text()
+            self._destroy_tagged('p2p_connecting_text')
             self.view.show_lobby_screen()
             return
         if nm.join_rejected is not None:
-            _clear_connecting_text()
-            nm.stop()
-            m.network_manager = None
-            self.view.display_error_message_screen(nm.join_rejected, self.view.show_local_mode_menu)
+            self._fail_p2p_join(nm, nm.join_rejected)
             return
         if time.time() - started_at > timeout:
-            _clear_connecting_text()
-            nm.stop()
-            m.network_manager = None
-            self.view.display_error_message_screen(
-                "Impossibile connettersi all'host: nessuna risposta.", self.view.show_local_mode_menu)
+            self._fail_p2p_join(nm, "Impossibile connettersi all'host: nessuna risposta.")
             return
         invoke(self.poll_p2p_join_outcome, nm, started_at, timeout, delay=0.2)
 
@@ -504,11 +519,7 @@ class GameController:
     def leave_lobby(self):
         m = self.model
         m.lobby_open = False
-        if m.network_manager:
-            if m.network_manager.is_host:
-                m.network_manager.broadcast_rpc("host_left")
-            m.network_manager.stop()
-            m.network_manager = None
+        self._leave_network()
         if m.broadcaster:
             m.broadcaster.stop()
             m.broadcaster = None
@@ -592,9 +603,7 @@ class GameController:
         m = self.model
         m.migrating = False
         m.game_paused = False
-        for t in list(scene.entities):
-            if getattr(t, 'tag', None) == 'pause_text':
-                destroy(t)
+        self._destroy_tagged('pause_text')
 
         if m.floors is not None:
             for cube in m.floors.floor_cubes:
@@ -603,6 +612,14 @@ class GameController:
 
     # Ciclo di gioco (chiamato da main.py ogni frame)
     def update(self):
+        try:
+            self._update_impl()
+        except Exception:
+            import traceback
+            print("[ERRORE] Eccezione in GameController.update() (vedi traceback sotto):")
+            traceback.print_exc()
+
+    def _update_impl(self):
         m = self.model
         nm = m.network_manager
         if nm:
