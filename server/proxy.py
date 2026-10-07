@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from config import LOG_PREFIX, MAX_PLAYERS
 
 GAME_INSTANCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_instance.py")
-HEALTH_CHECK_INTERVAL = 1.0  # secondi tra un controllo di vita del primary e il successivo
+HEALTH_CHECK_INTERVAL = 0.3 
 
 
 class MatchProxy:

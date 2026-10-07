@@ -13,9 +13,9 @@ from game_authority import GameAuthority
 from config import LOG_PREFIX
 
 JOIN_TIMEOUT_SECONDS = 30
-IDLE_SHUTDOWN_SECONDS = 3
+GAME_OVER_FLUSH_SECONDS = 0.5  # attesa breve dopo "game_won" prima di chiudere il socket
 STATUS_POLL_INTERVAL = 0.1
-SNAPSHOT_INTERVAL = 0.05       # 20 Hz: cadenza con cui ridistribuiamo le posizioni ai client
+SNAPSHOT_INTERVAL = 0.03       # 60 Hz: cadenza con cui ridistribuiamo le posizioni ai client
 REPLICATION_INTERVAL = 0.2     # 5 Hz: cadenza con cui il primary replica lo stato al backup
 
 
@@ -51,6 +51,7 @@ def make_rpc_handler(nm, authority, ready_state):
             pid = args[0]
             game_over, winner_pid = authority.remove_player(pid)
             if game_over:
+                ready_state["winner"] = winner_pid
                 nm.broadcast_rpc("game_won", winner_pid)
 
         elif method == "player_died":
@@ -58,6 +59,7 @@ def make_rpc_handler(nm, authority, ready_state):
             game_over, winner_pid = authority.handle_player_died(pid)
             nm.broadcast_rpc("player_removed", pid)
             if game_over:
+                ready_state["winner"] = winner_pid
                 nm.broadcast_rpc("game_won", winner_pid)
 
     return handle
@@ -118,11 +120,12 @@ def run_as_active_server(port, players_info, authority, log_tag):
                 nm.match_in_progress = True
                 nm.broadcast_rpc("start_countdown")
             time.sleep(STATUS_POLL_INTERVAL)
-            if len(nm.clients) > 0:
-                last_seen_player_time = time.time()
-            elif time.time() - last_seen_player_time > IDLE_SHUTDOWN_SECONDS:
-                print(f"{LOG_PREFIX}{log_tag} Tutti i giocatori se ne sono andati. Chiudo.")
-                break
+
+         
+            if authority.game_won:
+                nm.broadcast_rpc("game_won", ready_state.get("winner"))
+                print(f"{LOG_PREFIX}{log_tag} Partita conclusa. Chiudo.")
+
     except KeyboardInterrupt:
         pass
     finally:
