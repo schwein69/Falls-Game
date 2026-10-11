@@ -11,8 +11,7 @@ from usefulFunctions import get_random_position
 import network_p2p
 import network_online
 import rejoin_store
-from .message_handlers import MessageHandlers     # importato come pacchetto: controller.game_controller
-
+from .message_handler import MessageHandlers     
 def _guarded(fn):
     """Stampa per intero le eccezioni di update: Ursina le assorbe e il gioco si bloccherebbe muto."""
     def wrapper(self):
@@ -332,10 +331,9 @@ class GameController(MessageHandlers):
                 if cube.step_requested and not cube.has_activated and not cube.is_disappearing:
                     cube.step_requested = False
 
-    # ---------------- ciclo di gioco (chiamato da main.py) ----------------
+    # ---------------- ciclo di gioco ----------------
     @_guarded
     def update_network(self):
-        """Rete, migrazione, file di rientro, countdown. Gira SEMPRE, anche in pausa (ignore_paused in main.py)."""
         nm = self.model.network_manager
         if nm:
             nm.process_queue(self.handle_message)
@@ -349,7 +347,6 @@ class GameController(MessageHandlers):
 
     @_guarded
     def update_gameplay(self):
-        """Un frame di gioco. Ursina non lo chiama mentre l'app e' in pausa."""
         m = self.model
         nm = m.network_manager
         if not m.level_loaded or m.player is None or m.game_over:

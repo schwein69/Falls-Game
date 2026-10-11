@@ -61,7 +61,7 @@ class MessageHandlers:
         for pid_str, pos in positions.items():
             pid = int(pid_str)
             if nm and pid == nm.player_id:
-                continue                                  # noi non ci spostiamo con il nostro pacchetto
+                continue                                  
             if pid in m.other_players:
                 m.other_players[pid].position = Vec3(*pos)
             elif m.level_loaded:
@@ -86,8 +86,6 @@ class MessageHandlers:
         cube.on_authoritative_step(m.player if nm and pid == nm.player_id else None)
 
     def on_sync_state(self, destroyed_ids, positions, floor_seed=None):
-        """Ci mette in pari con lo stato dell'autorita'. Al rientro e' anche la prima volta che
-        sappiamo il seed: costruiamo qui il mondo e ci rimettiamo dove eravamo."""
         m = self.model
         rejoining = getattr(m, 'rejoin_pending', False)
         last = None
@@ -95,7 +93,6 @@ class MessageHandlers:
             m.current_floor_seed = floor_seed
             self._build_world(floor_seed, m.network_manager.player_id)
             last = positions.get(str(m.network_manager.player_id))
-        # I blocchi sotto di noi stanno ancora sparendo per gli altri: con force_destroy() rientreremmo nel vuoto.
         under = self._blocks_under(Vec3(*last)) if last is not None else set()
         if m.floors is not None:
             for block_id in destroyed_ids:
@@ -132,7 +129,7 @@ class MessageHandlers:
         m = self.model
         if m.game_over:
             return
-        application.resume()                  # in pausa i pulsanti non funzionano
+        application.resume()                  
         m.game_over = True
         if m.network_manager is not None:
             rejoin_store.clear(m.network_manager.player_id)

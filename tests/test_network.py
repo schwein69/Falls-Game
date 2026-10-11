@@ -13,7 +13,7 @@ import network_p2p
 
 
 def _collect_methods(nm, timeout=0.5):
-    """ritorna la lista dei metodi RPC ricevuti"""
+    """ritorna la lista dei metodi handler ricevuti"""
     received = []
     deadline = time.time() + timeout
     while time.time() < deadline:

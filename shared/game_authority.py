@@ -6,10 +6,10 @@ class GameAuthority:
         self.floor_seed = random.randint(0, 2 ** 31 - 1)
         self.destroyed_blocks = set()   # block_id (int) gia' distrutti
         self.player_positions = {}      # pid -> (x, y, z)
-        self.known_players = set()      # SOLO CRESCE: tutti i pid mai visti in questa partita
-        self.dead_players = set()       # pid caduti/eliminati (morte)
-        self.left_players = set()       # pid usciti (disconnessione) — distinto dai morti
-        self.game_won = False           # evita di dichiarare due volte una vittoria
+        self.known_players = set()      
+        self.dead_players = set()       # pid eliminati
+        self.left_players = set()       # pid usciti dalla partita
+        self.game_won = False           
 
     # Vittoria: vince l'ultimo giocatore rimasto vivo
     def handle_player_died(self, pid):
@@ -36,8 +36,7 @@ class GameAuthority:
     # Pavimento
     def handle_block_step(self, pid, block_id):
         """Un client segnala di essere passato sul blocco block_id. Ritorna il payload da
-        trasmettere a tutti se e' la prima volta che viene distrutto, altrimenti None
-        (richiesta ignorata: qualcun altro lo ha gia' consumato, o l'id non e' valido)."""
+        trasmettere a tutti se e' la prima volta che viene distrutto, altrimenti None."""
         if block_id is None:
             return None
         if block_id in self.destroyed_blocks:
@@ -56,21 +55,17 @@ class GameAuthority:
 
     def remove_player(self, pid):
         """Un giocatore si disconnette/lascia la partita. Ritorna (partita_finita,
-        vincitore_o_None) — non e' contato come 'morto', semplicemente non e' piu' tra quelli
-        in gara."""
+        vincitore_o_None)."""
         self.known_players.add(pid)
         self.left_players.add(pid)
         self.player_positions.pop(pid, None)
         return self._check_win()
 
     def snapshot_payload(self):
-        """Stato consolidato di TUTTI i giocatori noti, da trasmettere a intervalli fissi."""
         return {pid: list(pos) for pid, pos in self.player_positions.items()}
 
-    # Replica primary -> backup: serializzazione dello stato completo
     def to_dict(self):
-        """Tutto lo stato in una forma serializzabile in JSON, per replicarlo dal primary al
-        backup passivo. Gli insiemi (set) diventano liste — JSON non ha un tipo 'set'."""
+        """Serializza lo stato dell'autorita' in un dizionario, da trasmettere a un backup."""
         return {
             "floor_seed": self.floor_seed,
             "destroyed_blocks": list(self.destroyed_blocks),
@@ -83,9 +78,8 @@ class GameAuthority:
 
     @classmethod
     def from_dict(cls, data):
-        """Ricostruisce un'autorita' da uno stato replicato (vedi to_dict). Usato dal backup
-        quando viene promosso a primary, per ripartire dall'ULTIMO stato ricevuto invece che da
-        zero."""
+        """Ricostruisce un'autorita' da uno stato replicato. Usato dal backup
+        quando viene promosso a primary."""
         auth = cls()
         auth.floor_seed = data["floor_seed"]
         auth.destroyed_blocks = set(data["destroyed_blocks"])

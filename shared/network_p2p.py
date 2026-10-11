@@ -5,10 +5,7 @@ from config import P2P_PORT
 
 MAX_LOCAL_HOSTS = 10
 
-
 def _bind_to_first_free_port(nm, player_id=0):
-    """Prova P2P_PORT, poi le MAX_LOCAL_HOSTS-1 porte successive. Ritorna la porta su cui e'
-    riuscito a legarsi, o None se sono tutte occupate."""
     for offset in range(MAX_LOCAL_HOSTS):
         candidate_port = P2P_PORT + offset
         try:
@@ -27,7 +24,7 @@ def start_p2p_host():
     bound_port = _bind_to_first_free_port(nm)
     if bound_port is None:
         return nm, None, None
-    nm.room.host_plays = True  # l'host P2P e' anche un giocatore vero, a differenza del server online
+    nm.room.host_plays = True  
 
     authority = GameAuthority()
     nm.room.on_join = lambda pid, addr: nm.send_to(
@@ -43,11 +40,6 @@ def start_p2p_host():
 
 
 def join_p2p_host(ip, port, rejoin_id=None):
-    """Ci uniamo come client a un host P2P (scoperto via LAN o inserito manualmente).
-    'port' e' quella su cui QUELL'host specifico e' davvero in ascolto — puo' non essere
-    P2P_PORT se e' stato ospitato dopo un altro sullo stesso PC (vedi start_p2p_host). Non c'e'
-    nessuna GameAuthority da creare: siamo un giocatore normale, gli eventi di autorita' ci
-    arrivano dall'host via rete come per chiunque altro."""
     nm = NetworkManager()
     nm.allow_host_migration = True
     nm.join_network(ip, port, rejoin_id=rejoin_id)    # rejoin_id: l'id di chi rientra (vedi rejoin_store)
@@ -57,10 +49,7 @@ def join_p2p_host(ip, port, rejoin_id=None):
 # Migrazione dell'host
 def promote_to_host(old_network_manager, floor_seed, destroyed_blocks, player_positions, survivor_ids):
     """Un client normale diventa il nuovo host dopo che il vecchio e' sparito.
-    Ricostruisce lo stato di gioco (seed del pavimento, blocchi gia' distrutti, posizioni note)
-    a partire da quello che QUESTO client aveva gia' visto prima che l'host sparisse: e' un
-    "best effort", non un travaso perfetto.
-    Ritorna (network_manager, game_authority, broadcaster), stessa forma di start_p2p_host."""
+    Ricostruisce lo stato di gioco (seed del pavimento, blocchi gia' distrutti, posizioni note)"""
     my_id = old_network_manager.player_id
     old_network_manager.stop()
 
@@ -91,10 +80,6 @@ def promote_to_host(old_network_manager, floor_seed, destroyed_blocks, player_po
 
 
 def reconnect_to_new_host(my_id, new_host_ip, new_host_port):
-    """Un sopravvissuto (non eletto) si ricollega al nuovo host trovato sulla LAN, chiedendo di
-    riottenere lo stesso player_id di prima (vedi join_network(..., rejoin_id=...)).
-    'new_host_port' viene dalla discovery (listener.get_hosts()), non e' per forza P2P_PORT —
-    il nuovo host potrebbe aver dovuto usare una porta alternativa."""
     nm = NetworkManager()
     nm.allow_host_migration = True
     nm.join_network(new_host_ip, new_host_port, rejoin_id=my_id)
@@ -102,10 +87,7 @@ def reconnect_to_new_host(my_id, new_host_ip, new_host_port):
 
 
 def start_host_discovery_scan():
-    """Avvia un DiscoveryListener per cercare un host P2P sulla LAN. Usato sia dal normale
-    flusso di 'Join Game' (main.py, scan_lan_for_hosts) sia durante la ricerca del nuovo host
-    dopo una migrazione. Il chiamante deve interrogare periodicamente listener.get_hosts() e
-    chiamare listener.stop() quando ha finito."""
+    """Avvia un DiscoveryListener per cercare un host P2P sulla LAN."""
     listener = DiscoveryListener()
     listener.start()
     return listener

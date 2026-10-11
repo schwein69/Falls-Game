@@ -17,7 +17,6 @@ def _is_docker_virtual_network(ip):
         return False
     return octets[0] == 172 and 16 <= octets[1] <= 31
 
-# --- Broadcaster Class ---
 class DiscoveryBroadcaster:
     def __init__(self, host_player_id, game_port, port=BROADCAST_PORT):
         self.host_player_id = host_player_id
