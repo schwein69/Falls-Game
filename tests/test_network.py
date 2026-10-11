@@ -23,6 +23,19 @@ def _collect_methods(nm, timeout=0.5):
     return received
 
 
+def _pauses(nm, timeout=0.5):
+    """ritorna i game_pause ricevuti, come lista di True (pausa) / False (ripresa)"""
+    received = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        while not nm.msg_queue.empty():
+            msg = nm.msg_queue.get_nowait()
+            if msg.get("method") == "game_pause":
+                received.append(msg["args"][0])
+        time.sleep(0.02)
+    return received
+
+
 class TestMultiClientRoster(unittest.TestCase):
     """Copre: 'avviare piu' istanze e vedere tutti i giocatori correttamente'.
 
@@ -36,7 +49,7 @@ class TestMultiClientRoster(unittest.TestCase):
         self.port = 19100 + (id(self) % 500)  # porta diversa per ogni test
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
-        self.host.host_is_player = True
+        self.host.room.host_plays = True
         self.clients = []
 
     def tearDown(self):
@@ -67,14 +80,228 @@ class TestMultiClientRoster(unittest.TestCase):
         self.assertGreaterEqual(spawn_count, 3,
                                  "il terzo arrivato deve sapere di host, client1 e client2")
 
-    def test_immediate_disconnect_no_grace_period(self):
+    def test_window_close_during_match_pauses_then_removes_after_grace_period(self):
+        """DISCONNECT (finestra chiusa di colpo) a partita in corso: pausa subito, rimozione
+        solo dopo il tempo di grazia."""
+        self.host.room.match_started = True
         c1 = self._join()
         c2 = self._join()
-        _collect_methods(c2, timeout=0.3)  # scarichiamo il rumore iniziale
+        _collect_methods(c2, timeout=0.3)
 
-        c1.stop()  # uscita volontaria: deve essere immediata, niente periodo di grazia
-        methods = _collect_methods(c2, timeout=0.5)
-        self.assertIn("player_left", methods)
+        c1.stop()  # non volontario -> manda DISCONNECT
+        subito = _collect_methods(c2, timeout=0.3)
+        self.assertIn("game_pause", subito)
+        self.assertNotIn("player_left", subito)
+
+        self.host.check_client_liveness(timeout=0.1, grace_period=0.2)
+        time.sleep(0.3)
+        self.host.check_client_liveness(timeout=0.1, grace_period=0.2)
+        dopo = _collect_methods(c2, timeout=0.3)
+        self.assertIn("player_left", dopo)
+
+    def test_deliberate_leave_during_match_is_immediate_and_final(self):
+        """LEAVE (scelta volontaria) a partita in corso: via subito, nessuna pausa per gli altri."""
+        self.host.room.match_started = True
+        c1 = self._join()
+        c2 = self._join()
+        _collect_methods(c2, timeout=0.3)
+
+        c1.leaving_deliberately = True
+        c1.stop()
+        metodi = _collect_methods(c2, timeout=0.5)
+        self.assertIn("player_left", metodi)
+        self.assertNotIn("game_pause", metodi)
+
+    def test_window_close_in_lobby_is_immediate(self):
+        """Fuori partita (lobby) check_client_liveness non gira mai: una pausa non avrebbe
+        modo di concludersi. Chi esce va tolto subito, come sempre."""
+        self.assertFalse(self.host.room.match_started)
+        c1 = self._join()
+        c2 = self._join()
+        _collect_methods(c2, timeout=0.3)
+
+        c1.stop()
+        metodi = _collect_methods(c2, timeout=0.5)
+        self.assertIn("player_left", metodi)
+        self.assertNotIn("game_pause", metodi)
+
+
+class TestRejoinAfterRestart(unittest.TestCase):
+    """Rientro di un client che ha chiuso l'app e l'ha riaperta (nuovo processo, nuova porta UDP)."""
+
+    def setUp(self):
+        self._p = patch.object(network, "MAX_PLAYERS", 10)
+        self._p.start()
+        self.port = 19700 + (id(self) % 250)
+        self.host = NetworkManager()
+        self.host.setup_host(port=self.port)
+        self.host.room.host_plays = True
+        self.host.room.match_started = True
+        self.all = []
+
+    def tearDown(self):
+        self.host.stop()
+        for c in self.all:
+            c.stop()
+        self._p.stop()
+
+    def _join(self, rejoin_id=None):
+        c = NetworkManager()
+        c.join_network("127.0.0.1", self.port, rejoin_id=rejoin_id)
+        self.all.append(c)
+        time.sleep(0.4)
+        return c
+
+    def test_rejoin_while_paused_keeps_id_resumes_only_when_ready_and_syncs_state(self):
+        c1 = self._join()
+        c2 = self._join()
+        old_id = c1.player_id
+        _collect_methods(c2, timeout=0.2)
+
+        # il server conosce la posizione di c1 e un blocco gia' distrutto
+        self.host.room.on_join = lambda pid, addr: self.host.send_to(
+            addr, "sync_state", [7], {str(pid): [1.0, 2.0, 3.0]})
+
+        c1.stop()  # finestra chiusa di colpo
+        self.assertIn("game_pause", _collect_methods(c2, timeout=0.3))
+        self.assertEqual(len(self.host.room.silent), 1)
+
+        nuovo = self._join(rejoin_id=old_id)  # nuovo processo, nuova porta
+        self.assertEqual(nuovo.player_id, old_id, "deve riavere lo STESSO id")
+        self.assertEqual(len(self.host.room.silent), 0, "non e' piu' in pausa/scollegato")
+        self.assertEqual(len(self.host.room.clients), 2, "stesso numero di giocatori, nessun fantasma")
+
+        # gli altri NON riprendono finche' chi rientra non ha finito di caricare il livello...
+        self.assertEqual(_pauses(c2, timeout=0.4), [], "la ripresa non deve partire all'ingresso")
+        nuovo.send_message("rejoin_done", old_id)
+        # ...poi tutti riprendono insieme
+        self.assertEqual(_pauses(c2, timeout=0.4), [False])
+        # chi rientra riceve lo stato per rimettersi dov'era
+        ricevuti = []
+        while not nuovo.msg_queue.empty():
+            ricevuti.append(nuovo.msg_queue.get_nowait())
+        sync = [m for m in ricevuti if m.get("method") == "sync_state"]
+        self.assertEqual(len(sync), 1)
+        self.assertEqual(sync[0]["args"][1][str(old_id)], [1.0, 2.0, 3.0])
+
+    def test_rejoin_before_server_noticed_the_disconnect(self):
+        """App riaperta cosi' in fretta che il server non aveva ancora nemmeno notato la sparizione."""
+        c1 = self._join()
+        old_id = c1.player_id
+        c1.running = False           # crash: nessun DISCONNECT, il server non sa nulla
+        nuovo = self._join(rejoin_id=old_id)
+        self.assertEqual(nuovo.player_id, old_id)
+        self.assertEqual(len(self.host.room.clients), 1, "il vecchio indirizzo e' stato sostituito")
+
+    def test_rejoin_after_grace_period_is_refused_in_p2p(self):
+        c1 = self._join()
+        old_id = c1.player_id
+        c1.stop()
+        self.host.check_client_liveness(timeout=0.1, grace_period=0.1)
+        time.sleep(0.2)
+        self.host.check_client_liveness(timeout=0.1, grace_period=0.1)  # ormai rimosso
+        self.assertEqual(len(self.host.room.clients), 0)
+
+        nuovo = NetworkManager()
+        nuovo.join_network("127.0.0.1", self.port, rejoin_id=old_id)
+        self.all.append(nuovo)
+        deadline = time.time() + 3
+        while nuovo.join_rejected is None and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIsNotNone(nuovo.join_rejected)
+        self.assertIn("scaduto", nuovo.join_rejected)
+        self.assertIsNone(nuovo.player_id, "non deve ricevere un id nuovo a partita in corso")
+
+    def test_rejoin_in_online_mode_with_new_udp_port(self):
+        """Online: la porta nuova NON e' tra quelle pre-autorizzate, ma il posto esiste ancora:
+        il rientro deve funzionare lo stesso."""
+        self.host.stop()
+        self.host = NetworkManager()
+        a = NetworkManager(); pa = a.prepare_local_socket(); self.all.append(a)
+        self.host.room.expected = {("127.0.0.1", pa): 4242}
+        self.host.setup_host(port=self.port + 300)
+        self.host.room.match_started = True
+        a.join_network("127.0.0.1", self.port + 300)
+        time.sleep(0.4)
+        self.assertEqual(a.player_id, 4242)
+        a.stop()
+
+        nuovo = NetworkManager()
+        nuovo.join_network("127.0.0.1", self.port + 300, rejoin_id=4242)
+        self.all.append(nuovo)
+        time.sleep(0.5)
+        self.assertEqual(nuovo.player_id, 4242)
+
+
+    def test_others_wait_while_rejoiner_loads_and_it_is_not_flagged_silent(self):
+        c1 = self._join()
+        c2 = self._join()
+        old_id = c1.player_id
+        _collect_methods(c2, timeout=0.2)
+        c1.stop()
+        self.assertEqual(_pauses(c2, timeout=0.3), [True])
+        nuovo = self._join(rejoin_id=old_id)
+        self.assertIn(old_id, self.host.room.rejoining)
+        # il caricamento dura piu' del timeout di silenzio: non deve essere segnato "disconnesso" ne' rimosso
+        time.sleep(0.4)
+        self.host.check_client_liveness(timeout=0.1, grace_period=0.1)
+        self.assertEqual(len(self.host.room.silent), 0)
+        self.assertEqual(len(self.host.room.clients), 2)
+        self.assertEqual(_pauses(c2, timeout=0.2), [])
+        nuovo.send_message("rejoin_done", old_id)
+        self.assertEqual(_pauses(c2, timeout=0.4), [False])
+        self.assertNotIn(old_id, self.host.room.rejoining)
+
+    def test_rejoin_before_server_noticed_pauses_the_others_until_ready(self):
+        c1 = self._join()
+        c2 = self._join()
+        old_id = c1.player_id
+        _collect_methods(c2, timeout=0.2)
+        c1.running = False                       # crash: nessun DISCONNECT, il server non sa nulla
+        nuovo = self._join(rejoin_id=old_id)
+        self.assertEqual(_pauses(c2, timeout=0.4), [True], "mentre carica gli altri non devono andare avanti")
+        nuovo.send_message("rejoin_done", old_id)
+        self.assertEqual(_pauses(c2, timeout=0.4), [False])
+
+    def test_rejoiner_that_leaves_while_loading_resumes_the_others(self):
+        c1 = self._join()
+        c2 = self._join()
+        old_id = c1.player_id
+        _collect_methods(c2, timeout=0.2)
+        c1.stop()
+        _pauses(c2, timeout=0.3)
+        nuovo = self._join(rejoin_id=old_id)
+        nuovo.leaving_deliberately = True        # rientro fallito: il client torna al menu
+        nuovo.stop()
+        time.sleep(0.3)
+        methods = []
+        while not c2.msg_queue.empty():
+            methods.append(c2.msg_queue.get_nowait())
+        self.assertIn(False, [m["args"][0] for m in methods if m.get("method") == "game_pause"], "gli altri devono riprendere")
+        self.assertIn("player_left", [m.get("method") for m in methods])
+        self.assertEqual(len(self.host.room.rejoining), 0)
+
+    def test_rejoiner_that_never_finishes_loading_is_removed_and_the_others_resume(self):
+        c1 = self._join()
+        c2 = self._join()
+        old_id = c1.player_id
+        _collect_methods(c2, timeout=0.2)
+        c1.stop()
+        _pauses(c2, timeout=0.3)
+        self._join(rejoin_id=old_id)             # rientra ma non manda mai rejoin_done
+        with patch.object(network, "REJOIN_LOAD_TIMEOUT", 0.2):
+            time.sleep(0.3)
+            self.host.check_client_liveness(timeout=5, grace_period=5)
+        methods = []
+        deadline = time.time() + 0.4
+        while time.time() < deadline:
+            while not c2.msg_queue.empty():
+                methods.append(c2.msg_queue.get_nowait())
+            time.sleep(0.02)
+        self.assertIn(False, [m["args"][0] for m in methods if m.get("method") == "game_pause"])
+        self.assertIn("player_left", [m.get("method") for m in methods])
+        self.assertEqual(len(self.host.room.clients), 1)
+        self.assertEqual(len(self.host.room.rejoining), 0)
 
 
 class TestAntiSpoofing(unittest.TestCase):
@@ -125,7 +352,7 @@ class TestHostMigration(unittest.TestCase):
         host = network_p2p.NetworkManager()
         host.allow_host_migration = True
         host.setup_host(port=self.port)
-        host.host_is_player = True
+        host.room.host_plays = True
 
         c1 = network_p2p.NetworkManager()
         c1.allow_host_migration = True
@@ -179,11 +406,11 @@ class TestClientDisconnectPauseAndRejoin(unittest.TestCase):
         self.port = 19700 + (id(self) % 200)
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
-        self.host.host_is_player = True
+        self.host.room.host_plays = True
         # Il controllo del silenzio vale solo a partita iniziata (vedi match_in_progress in
         # network.py: in lobby un client non manda nulla, non e' "disconnesso"). Questi test
         # simulano una partita in corso.
-        self.host.match_in_progress = True
+        self.host.room.match_started = True
 
     def tearDown(self):
         self.host.stop()
@@ -192,18 +419,18 @@ class TestClientDisconnectPauseAndRejoin(unittest.TestCase):
         client = NetworkManager()
         client.join_network("127.0.0.1", self.port)
         time.sleep(0.2)
-        client.send_rpc("update_pos", client.player_id, 0, 0, 0)
+        client.send_message("update_pos", client.player_id, 0, 0, 0)
 
         # Aspettiamo PIU' del timeout (0.3s) senza mandare nient'altro: deve risultare sospetto.
         time.sleep(0.4)
         self.host.check_client_liveness(timeout=0.3, grace_period=0.5)
-        self.assertIn(client.player_id, [pid for _, (pid, _) in self.host.disconnected_clients.items()],
+        self.assertIn(client.player_id, [pid for _, (pid, _) in self.host.room.silent.items()],
                        "dopo il timeout di silenzio, il client deve risultare 'in pausa'")
 
         # Il tempo di grazia (0.5s) scade senza che si faccia risentire: viene rimosso per davvero.
         time.sleep(0.6)
         self.host.check_client_liveness(timeout=0.3, grace_period=0.5)
-        remaining_pids = list(self.host.clients.values())
+        remaining_pids = list(self.host.room.clients.values())
         self.assertNotIn(client.player_id, remaining_pids,
                           "dopo la scadenza della grazia, il client va rimosso per davvero")
         client.stop()
@@ -212,21 +439,21 @@ class TestClientDisconnectPauseAndRejoin(unittest.TestCase):
         client = NetworkManager()
         client.join_network("127.0.0.1", self.port)
         time.sleep(0.2)
-        client.send_rpc("update_pos", client.player_id, 0, 0, 0)  # stabilisce un "ultimo visto"
+        client.send_message("update_pos", client.player_id, 0, 0, 0)  # stabilisce un "ultimo visto"
 
         # Aspettiamo piu' di un timeout molto breve, cosi' risulta sospetto...
         time.sleep(0.15)
         self.host.check_client_liveness(timeout=0.1, grace_period=5.0)
-        self.assertTrue(len(self.host.disconnected_clients) > 0)
+        self.assertTrue(len(self.host.room.silent) > 0)
 
         # ...ma poi ricomincia a mandare pacchetti PRIMA che scada la grazia (5s): deve
         # rientrare da solo, senza essere rimosso.
-        client.send_rpc("update_pos", client.player_id, 1, 1, 1)
+        client.send_message("update_pos", client.player_id, 1, 1, 1)
         time.sleep(0.2)
 
-        self.assertEqual(len(self.host.disconnected_clients), 0,
+        self.assertEqual(len(self.host.room.silent), 0,
                           "riprendendo a mandare pacchetti, il client deve rientrare da solo")
-        self.assertIn(client.player_id, self.host.clients.values(),
+        self.assertIn(client.player_id, self.host.room.clients.values(),
                        "il client rimane registrato, non viene mai rimosso")
         client.stop()
 
@@ -283,7 +510,7 @@ class TestJoinReliability(unittest.TestCase):
 
         self.assertEqual(resp["id"], first_id,
                          "una richiesta ripetuta dallo stesso indirizzo deve riavere lo stesso id")
-        self.assertEqual(len(self.server.clients), 1,
+        self.assertEqual(len(self.server.room.clients), 1,
                          "non deve registrare un giocatore in piu' per lo stesso indirizzo")
 
 
@@ -295,16 +522,16 @@ class TestLobbyIsNotMistakenForDisconnect(unittest.TestCase):
         host = NetworkManager()
         host.is_host = True
         addr = ("127.0.0.1", 55555)
-        host.clients[addr] = 1
-        host.client_last_seen[addr] = time.time() - 30       # 30s di silenzio
+        host.room.clients[addr] = 1
+        host.room.last_seen[addr] = time.time() - 30       # 30s di silenzio
 
-        host.match_in_progress = False                        # ancora in lobby
+        host.room.match_started = False                        # ancora in lobby
         host.check_client_liveness(timeout=5, grace_period=10)
-        self.assertEqual(len(host.disconnected_clients), 0)
+        self.assertEqual(len(host.room.silent), 0)
 
-        host.match_in_progress = True                         # partita iniziata
+        host.room.match_started = True                         # partita iniziata
         host.check_client_liveness(timeout=5, grace_period=10)
-        self.assertEqual(len(host.disconnected_clients), 1)
+        self.assertEqual(len(host.room.silent), 1)
 
 
 if __name__ == "__main__":

@@ -18,10 +18,9 @@ STATUS_KEY = "matchmaking:status"
 
 pending_clients = []  # list of (player_id, client_ip, udp_port, tcp_conn)
 active_games = {}     # port -> {players: [...], start_ts: ...}
-active_processes = {} # port -> subprocess.Popen del proxy di quella partita — serve SOLO per
-                       # sapere quando la partita e' davvero finita, vedi cleanup_finished_games()
+active_processes = {} # port -> subprocess.Popen del proxy di quella partita 
 next_game_port = GAME_INSTANCE_BASE_PORT
-port_lock = threading.Lock()
+port_lock = threading.RLock()   
 CLEANUP_INTERVAL = 2.0  # secondi tra un controllo delle partite concluse e il successivo
 
 
@@ -53,8 +52,6 @@ def _wait_for_proxy_ready(tcp_port, timeout=5.0):
 
 
 def _remove_from_queue(entry, reason):
-    """Toglie un giocatore dalla coda in modo sicuro (idempotente: se e' gia' stato tolto,
-    es. perche' nel frattempo e' scattato un match, non fa nulla di male a riprovare)."""
     with port_lock:
         if entry in pending_clients:
             pending_clients.remove(entry)
@@ -62,89 +59,100 @@ def _remove_from_queue(entry, reason):
             write_status()
 
 
-def handle_client(conn, addr):
+def find_game_of(player_id):
+    """Il rientro del giocatore. Risponde "GAME:host:porta-del-proxy", oppure "NOT_FOUND" se la partita e' finita."""
+    with port_lock:
+        for proxy_port, game in active_games.items():
+            if player_id in game["players"]:
+                return f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_port}"
+    return "NOT_FOUND"
+
+
+def _close(conn):
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _send(conn, data):
+    """Manda dei byte; False se il client e' gia' sparito."""
+    try:
+        conn.sendall(data)
+        return True
+    except Exception:
+        return False
+
+
+def _start_game(group):
+    """Gruppo completo: avvia il proxy della partita e manda a ognuno GAME:host:porta. Con port_lock preso."""
     global next_game_port
+    proxy_tcp_port, udp_base_port = next_game_port, next_game_port + 1
+    next_game_port += 10
+    players_info = [(pid, ip, udp) for (pid, ip, udp, _) in group]
+    print(f"{LOG_PREFIX} Avvio il proxy (porta TCP {proxy_tcp_port}, blocco UDP da "
+          f"{udp_base_port}) per i giocatori: {[p[0] for p in players_info]}")
+    proxy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy.py")
+    active_processes[proxy_tcp_port] = subprocess.Popen(
+        [sys.executable, proxy_path, str(proxy_tcp_port), json.dumps(players_info), str(udp_base_port)])
+    _wait_for_proxy_ready(proxy_tcp_port)
+    active_games[proxy_tcp_port] = {"players": [p[0] for p in players_info], "start_ts": time.time()}
+    write_status()
+    for pid, _, _, c in group:
+        try:
+            c.sendall(f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_tcp_port}".encode())
+            c.close()
+        except Exception as e:
+            print(f"{LOG_PREFIX} Failed to notify client {pid}: {e}")
+
+
+def _wait_in_queue(conn, entry):
+    while True:
+        try:
+            data = conn.recv(64)
+        except Exception:
+            data = b""
+        if not data or data.strip() == b"CANCEL":
+            _remove_from_queue(entry, "annullato esplicitamente dal client" if data else "connessione chiusa dal client")
+            _close(conn)
+            return
+
+
+def handle_client(conn, addr):
     entry = None
     try:
-        data = conn.recv(2048).decode()
-        info = json.loads(data)
-        player_id = info.get("id")
-        udp_port = info.get("udp_port")
-        client_ip = addr[0]
-        print(f"{LOG_PREFIX} New matchmaking connection: {player_id}@{client_ip}:{udp_port}")
+        info = json.loads(conn.recv(2048).decode())
+        if "rejoin_id" in info:                                   # rientro in partita
+            _send(conn, find_game_of(info["rejoin_id"]).encode())
+            _close(conn)
+            return
+        player_id, udp_port = info.get("id"), info.get("udp_port")
+        print(f"{LOG_PREFIX} New matchmaking connection: {player_id}@{addr[0]}:{udp_port}")
+        entry = (player_id, addr[0], udp_port, conn)
 
-        entry = (player_id, client_ip, udp_port, conn)
         with port_lock:
+            if any(p[0] == player_id for p in pending_clients):
+                print(f"{LOG_PREFIX} Player {player_id} rifiutato: id gia' in coda.")
+                _send(conn, b"ID_COLLISION")
+                _close(conn)
+                return
             pending_clients.append(entry)
             write_status()
-            if len(pending_clients) >= MAX_PLAYERS:
+            if len(pending_clients) >= MAX_PLAYERS:               # gruppo completo: parte la partita
                 group = pending_clients[:MAX_PLAYERS]
                 del pending_clients[:MAX_PLAYERS]
-
-                proxy_tcp_port = next_game_port
-                udp_base_port = next_game_port + 1
-                next_game_port += 10
-                players_info = [(pid, ip, udp) for (pid, ip, udp, _) in group]
-                players_json = json.dumps(players_info)
-
-                print(f"{LOG_PREFIX} Avvio il proxy (porta TCP {proxy_tcp_port}, blocco UDP da "
-                      f"{udp_base_port}) per i giocatori: {[p[0] for p in players_info]}")
-                proxy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy.py")
-                proxy_process = subprocess.Popen([sys.executable, proxy_path,
-                                   str(proxy_tcp_port), players_json, str(udp_base_port)])
-                active_processes[proxy_tcp_port] = proxy_process
-
-                _wait_for_proxy_ready(proxy_tcp_port)
-
-                active_games[proxy_tcp_port] = {
-                    "players": [p[0] for p in players_info],
-                    "start_ts": time.time(),
-                }
-                write_status()
-
-                for (pid, ip, udp, c) in group:
-                    try:
-                        msg = f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_tcp_port}"
-                        c.sendall(msg.encode())
-                        c.close()
-                    except Exception as e:
-                        print(f"{LOG_PREFIX} Failed to notify client {pid}: {e}")
-                return  # consumato da un match: questa connessione ha gia' fatto il suo dovere
-            else:
-                try:
-                    conn.sendall(b"WAIT")
-                except Exception:
-                    _remove_from_queue(entry, "connessione persa mentre mandavo WAIT")
-                    return
-
-        while True:
-            try:
-                data = conn.recv(64)
-            except Exception:
-                data = b""
-            if not data:
-                _remove_from_queue(entry, "connessione chiusa dal client")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                return
-            if data.strip() == b"CANCEL":
-                _remove_from_queue(entry, "annullato esplicitamente dal client")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                _start_game(group)
+                return                                           
+            if not _send(conn, b"WAIT"):                          # sotto lock: WAIT parte sempre prima di un eventuale GAME
+                _remove_from_queue(entry, "connessione persa mentre mandavo WAIT")
                 return
 
+        _wait_in_queue(conn, entry)
     except Exception as e:
         print(f"{LOG_PREFIX} Error handling matchmaking client: {e}")
         if entry is not None:
             _remove_from_queue(entry, "errore nella connessione")
-        try:
-            conn.close()
-        except:
-            pass
+        _close(conn)
     finally:
         write_status()
 

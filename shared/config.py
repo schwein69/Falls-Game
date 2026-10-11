@@ -1,17 +1,17 @@
 # Configuration constants for the project
 MATCHMAKING_TCP_PORT = 9001       # Matchmaking server TCP port
-DASHBOARD_PORT = 8081              # Dashboard HTTP di sola lettura (porta 8080 spesso occupata
-                                    # da altri servizi/processi di sistema su Windows)
-GAME_INSTANCE_BASE_PORT = 10000            # Starting port for game instances
-P2P_PORT = 12345                # Default P2P port for game instances
-MAX_PLAYERS = 3                  # Max players per game lobby
+DASHBOARD_PORT = 8081             # Dashboard HTTP di sola lettura
+GAME_INSTANCE_BASE_PORT = 10000   # Starting port for game instances
+P2P_PORT = 12345                  # Default P2P port for game instances
+MAX_PLAYERS = 3                   # Max players per game lobby
+
 SPAWN_HEIGHT = 45
 
-# Heartbeat settings (seconds)
+# Heartbeat settings 
 HEARTBEAT_INTERVAL = 1
 HEARTBEAT_TIMEOUT = 5
 REJOIN_GRACE_PERIOD = 15
 REJOIN_TIMER = 10
 MATCHMAKING_HOSTNAME = "127.0.0.1" 
 SERVER_BIND = ""  # Bind to all interfaces
-LOG_PREFIX = "[MM]"
+LOG_PREFIX = "[Server]"
