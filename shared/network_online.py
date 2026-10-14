@@ -106,9 +106,8 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10, rejoin_id
 
     nm.online.proxy_sock = sock    # serve anche per chiuderlo in stop()
     sock.settimeout(None)
-    print(f"[Network] Il proxy indica il primary su {info['primary_host']}:{info['primary_port']}. Mi unisco.")
-    nm.join_network(info["primary_host"], info["primary_port"], rejoin_id=rejoin_id)
-
+    print(f"[Network] Il proxy indica il primary su {proxy_host}:{info['primary_port']}. Mi unisco.")
+    nm.join_network(proxy_host, info["primary_port"], rejoin_id=rejoin_id)  
     def _listen_for_failover():
         while True:
             try:
@@ -119,7 +118,7 @@ def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10, rejoin_id
             if "new_primary_host" in info:
                 print(f"[Network] Il primary e' cambiato (failover): mi riaggancio con lo stesso ID ({nm.player_id}).")
                 nm.last_host_seen = time.time()
-                nm.join_network(info["new_primary_host"], info["new_primary_port"], rejoin_id=nm.player_id)
+                nm.join_network(proxy_host, info["new_primary_port"], rejoin_id=nm.player_id)
 
     threading.Thread(target=_listen_for_failover, daemon=True).start()
 

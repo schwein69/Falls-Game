@@ -16,27 +16,38 @@ def _bind_to_first_free_port(nm, player_id=0):
     return None
 
 
-def start_p2p_host():
-    """Diventiamo host di una partita P2P locale: siamo noi il punto di smistamento E un
-    giocatore. Ritorna (network_manager, game_authority, broadcaster)."""
+def _become_host(player_id=0, restore=None, pending_ids=()):
     nm = NetworkManager()
     nm.allow_host_migration = True
-    bound_port = _bind_to_first_free_port(nm)
-    if bound_port is None:
-        return nm, None, None
-    nm.room.host_plays = True  
+    nm.room.host_plays = True                  # l'host P2P e' anche un giocatore
+    nm.room.pending_ids = set(pending_ids)     # chi puo' rientrare dopo una migrazione
+    nm.room.closed = restore is not None       # dopo una migrazione la partita e' gia' iniziata
 
     authority = GameAuthority()
+    if restore is not None:                   
+        floor_seed, destroyed_blocks, player_positions = restore
+        if floor_seed is not None:
+            authority.floor_seed = floor_seed
+        authority.destroyed_blocks = set(destroyed_blocks)
+        authority.player_positions = dict(player_positions)
+
     nm.room.on_join = lambda pid, addr: nm.send_to(
         addr, "sync_state", authority.already_destroyed_blocks(), authority.snapshot_payload(),
         authority.floor_seed)
+
+    bound_port = _bind_to_first_free_port(nm, player_id)
+    if bound_port is None:
+        return nm, None, None
     nm.start_broadcast_tick(authority.snapshot_payload)
     nm.start_heartbeat()
 
-    broadcaster = DiscoveryBroadcaster("0", bound_port)
+    broadcaster = DiscoveryBroadcaster(str(player_id), bound_port)
     broadcaster.start()
-
     return nm, authority, broadcaster
+
+
+def start_p2p_host():
+    return _become_host()
 
 
 def join_p2p_host(ip, port, rejoin_id=None):
@@ -48,35 +59,10 @@ def join_p2p_host(ip, port, rejoin_id=None):
 
 # Migrazione dell'host
 def promote_to_host(old_network_manager, floor_seed, destroyed_blocks, player_positions, survivor_ids):
-    """Un client normale diventa il nuovo host dopo che il vecchio e' sparito.
-    Ricostruisce lo stato di gioco (seed del pavimento, blocchi gia' distrutti, posizioni note)"""
     my_id = old_network_manager.player_id
     old_network_manager.stop()
-
-    nm = NetworkManager()
-    nm.allow_host_migration = True
-    nm.room.pending_ids = set(survivor_ids) - {my_id}
-    bound_port = _bind_to_first_free_port(nm, player_id=my_id)
-    if bound_port is None:
-        return nm, None, None
-    nm.room.host_plays = True
-
-    authority = GameAuthority()
-    if floor_seed is not None:
-        authority.floor_seed = floor_seed
-    authority.destroyed_blocks = set(destroyed_blocks)
-    authority.player_positions = dict(player_positions)
-
-    nm.room.on_join = lambda pid, addr: nm.send_to(
-        addr, "sync_state", authority.already_destroyed_blocks(), authority.snapshot_payload(),
-        authority.floor_seed)
-    nm.start_broadcast_tick(authority.snapshot_payload)
-    nm.start_heartbeat()
-
-    broadcaster = DiscoveryBroadcaster(str(my_id), bound_port)
-    broadcaster.start()
-
-    return nm, authority, broadcaster
+    return _become_host(my_id, restore=(floor_seed, destroyed_blocks, player_positions),
+                        pending_ids=set(survivor_ids) - {my_id})
 
 
 def reconnect_to_new_host(my_id, new_host_ip, new_host_port):

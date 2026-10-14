@@ -45,7 +45,6 @@ class GameAuthority:
         return {"block_id": block_id, "pid": pid}
 
     def already_destroyed_blocks(self):
-        """Usato per il 'catch-up' di chi si unisce o si riconnette a partita in corso."""
         return list(self.destroyed_blocks)
 
     # Posizioni

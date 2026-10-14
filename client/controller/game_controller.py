@@ -247,8 +247,12 @@ class GameController(MessageHandlers):
     # ---------------- lobby ----------------
     def begin_game(self):
         m = self.model
+        m.network_manager.room.closed = True                 
+        if m.broadcaster:
+            m.broadcaster.stop()                             
+            m.broadcaster = None
         m.network_manager.send_message("start_game", m.game_authority.floor_seed)
-        self.on_start_game(m.game_authority.floor_seed)      # l'host lo applica in locale
+        self.on_start_game(m.game_authority.floor_seed)      
 
     def leave_lobby(self):
         m = self.model
@@ -410,7 +414,7 @@ class GameController(MessageHandlers):
         m.game_over = False
         self._countdown_end = None
 
-    # ---------------- rientro dopo la chiusura dell'app (il file ha solo nome e id) ----------------
+    # ---------------- rientro dopo la chiusura dell'app  ----------------
     def _remember(self):
         """Ogni secondo, da client in partita, aggiorna il file di rientro."""
         m = self.model
@@ -520,19 +524,21 @@ class GameController(MessageHandlers):
         self._end_rejoin()
         if last is not None:
             m.player.position = self._safe_position(Vec3(*last))
+            for cube in m.floors.floor_cubes:                
+                if not cube.is_empty():                      
+                    cube.updateColliders(m.player)
         if hasattr(m.player, "air_time"):
             m.player.air_time = 0                             # la velocita' di caduta riparte da zero
         m.player.gravity = 1
         m.level_loaded = True
         application.pause()                                   # fermi come gli altri finche' non arriva la ripresa
         Text("Rientro completato...", scale=1.5, origin=(0, 0), y=0.1, parent=camera.ui, tag='pause_text')
-        self._rejoin_wait_until = time.time() + 8             # ripiego se la ripresa (UDP) si perde
-        for _ in range(3):                                    # tre copie: il server ne usa una
+        self._rejoin_wait_until = time.time() + 8             
+        for _ in range(3):                                    
             nm.send_message("rejoin_done", nm.player_id)
         print("[Game] Rientro completato: attendo la ripresa.")
 
     def _abort_rejoin(self, reason):
-        """Rientro fallito: smonta quanto costruito e torna al menu con una spiegazione."""
         m = self.model
         r = self._end_rejoin()
         if r is not None:
@@ -545,13 +551,11 @@ class GameController(MessageHandlers):
         self.view.display_error_message_screen(f"Impossibile rientrare: {reason}", self.view.show_main_menu_screen)
 
     def _blocks_under(self, pos):
-        """Id dei blocchi su cui poggia `pos` (come is_player_standing_on, appena piu' largo)."""
         return {c.block_id for c in self.model.floors.floor_cubes
                 if distance_xz(pos, c.position) <= c.activation_distance + 1
                 and abs(pos.y - (c.y + CUBE_SCALE / 2)) < 1.5}
 
     def _safe_position(self, pos):
-        """Se sotto `pos` non c'e' piu' terreno, ti posa sul blocco esistente piu' vicino."""
         alive = [c for c in self.model.floors.floor_cubes if not c.is_empty()]
 
         def top(c):
@@ -563,5 +567,4 @@ class GameController(MessageHandlers):
         if not pool:
             return pos
         best = min(pool, key=lambda c: (distance_xz(pos, c.position), -top(c)))
-        print(f"[Game] Sotto la posizione di rientro non c'e' piu' terreno: ti posiamo sul blocco {best.block_id}.")
         return Vec3(best.x, top(best), best.z)

@@ -12,6 +12,15 @@ from network import NetworkManager
 import network_p2p
 
 
+import itertools
+_ports = itertools.count(19100)
+
+
+def _next_port():
+    """Una porta diversa per ogni test (id(self) poteva ripetersi e far scontrare due test)."""
+    return next(_ports) + 1
+
+
 def _collect_methods(nm, timeout=0.5):
     """ritorna la lista dei metodi handler ricevuti"""
     received = []
@@ -46,7 +55,7 @@ class TestMultiClientRoster(unittest.TestCase):
     def setUp(self):
         self._max_players_patch = patch.object(network, "MAX_PLAYERS", 10)
         self._max_players_patch.start()
-        self.port = 19100 + (id(self) % 500)  # porta diversa per ogni test
+        self.port = _next_port()  # porta diversa per ogni test
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
         self.host.room.host_plays = True
@@ -132,7 +141,7 @@ class TestRejoinAfterRestart(unittest.TestCase):
     def setUp(self):
         self._p = patch.object(network, "MAX_PLAYERS", 10)
         self._p.start()
-        self.port = 19700 + (id(self) % 250)
+        self.port = _next_port()
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
         self.host.room.host_plays = True
@@ -306,7 +315,7 @@ class TestRejoinAfterRestart(unittest.TestCase):
 
 class TestAntiSpoofing(unittest.TestCase):
     def setUp(self):
-        self.port = 19600 + (id(self) % 300)
+        self.port = _next_port()
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
 
@@ -343,7 +352,7 @@ class TestHostMigration(unittest.TestCase):
     def setUp(self):
         self._max_players_patch = patch.object(network, "MAX_PLAYERS", 10)
         self._max_players_patch.start()
-        self.port = 19900 + (id(self) % 90)
+        self.port = _next_port()
 
     def tearDown(self):
         self._max_players_patch.stop()
@@ -403,7 +412,7 @@ class TestClientDisconnectPauseAndRejoin(unittest.TestCase):
     minuti interi con i valori reali di config.py."""
 
     def setUp(self):
-        self.port = 19700 + (id(self) % 200)
+        self.port = _next_port()
         self.host = NetworkManager()
         self.host.setup_host(port=self.port)
         self.host.room.host_plays = True
@@ -464,7 +473,7 @@ class TestJoinReliability(unittest.TestCase):
     stessa porta, solo per assegnare gli id in modo affidabile — il gioco vero resta su UDP)."""
 
     def setUp(self):
-        self.port = 19400 + (id(self) % 200)
+        self.port = _next_port()
         self.server = None
         self.client = None
 
@@ -533,6 +542,52 @@ class TestLobbyIsNotMistakenForDisconnect(unittest.TestCase):
         host.check_client_liveness(timeout=5, grace_period=10)
         self.assertEqual(len(host.room.silent), 1)
 
+
+
+class TestClosedRoom(unittest.TestCase):
+    """P2P: dopo lo Start dell'host nessun nuovo giocatore, ma chi era gia' dentro puo' rientrare."""
+
+    def setUp(self):
+        self.port = _next_port()
+        self.host = NetworkManager()
+        self.host.setup_host(port=self.port)
+        self.host.room.host_plays = True
+        self.all = []
+
+    def tearDown(self):
+        self.host.stop()
+        for c in self.all:
+            c.stop()
+
+    def _join(self, rejoin_id=None):
+        c = NetworkManager()
+        c.join_network("127.0.0.1", self.port, rejoin_id=rejoin_id)
+        self.all.append(c)
+        return c
+
+    def test_new_player_refused_after_start(self):
+        self._join()
+        time.sleep(0.3)
+        self.host.room.closed = True
+        late = self._join()
+        deadline = time.time() + 3
+        while late.join_rejected is None and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIn("gia' iniziata", late.join_rejected)
+        self.assertIsNone(late.player_id)
+        self.assertEqual(len(self.host.room.clients), 1)
+
+    def test_rejoin_still_allowed_after_start(self):
+        c1 = self._join()
+        time.sleep(0.3)
+        old_id = c1.player_id
+        self.host.room.closed = True
+        self.host.room.match_started = True
+        c1.stop()
+        self.host.check_client_liveness(timeout=0.1, grace_period=10)
+        again = self._join(rejoin_id=old_id)
+        time.sleep(0.5)
+        self.assertEqual(again.player_id, old_id)
 
 if __name__ == "__main__":
     unittest.main()

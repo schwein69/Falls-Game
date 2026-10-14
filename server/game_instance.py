@@ -207,7 +207,6 @@ def run_backup(port, control_port, replica_port, players_info):
 
     threading.Thread(target=_replica_receiver, daemon=True).start()
 
-    # Canale di controllo: il proxy si connette qui e manda "PROMOTE" quando il primary muore.
     control_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     control_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     control_srv.bind(("", control_port))
