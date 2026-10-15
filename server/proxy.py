@@ -7,7 +7,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
-from config import LOG_PREFIX, MAX_PLAYERS
+from config import LOG_PREFIX, MAX_PLAYERS, GAME_PUBLIC_HOST
 
 GAME_INSTANCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_instance.py")
 HEALTH_CHECK_INTERVAL = 0.3 
@@ -75,7 +75,7 @@ class MatchProxy:
             threading.Thread(target=self._send_current_primary, args=(conn,), daemon=True).start()
 
     def _send_current_primary(self, conn):
-        msg = json.dumps({"primary_host": "127.0.0.1", "primary_port": self.primary_port}) + "\n"
+        msg = json.dumps({"primary_host": GAME_PUBLIC_HOST, "primary_port": self.primary_port}) + "\n"
         try:
             conn.sendall(msg.encode())
         except Exception as e:
@@ -120,7 +120,7 @@ class MatchProxy:
             return
 
         self.failover_done = True
-        msg = json.dumps({"new_primary_host": "127.0.0.1", "new_primary_port": self.backup_port}) + "\n"
+        msg = json.dumps({"new_primary_host": GAME_PUBLIC_HOST, "new_primary_port": self.backup_port}) + "\n"
         with self.lock:
             for conn in self.client_sockets:
                 try:
