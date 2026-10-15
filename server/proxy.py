@@ -81,7 +81,6 @@ class MatchProxy:
         except Exception as e:
             print(f"{LOG_PREFIX}[Proxy] Errore mandando l'indirizzo del primary a un client: {e}")
 
-    # ------------------------------------------------------------------
     def _health_check_loop(self):
         while not self.should_exit.is_set():
             time.sleep(HEALTH_CHECK_INTERVAL)
@@ -107,8 +106,7 @@ class MatchProxy:
             self._failover()
 
     def _failover(self):
-        """Promuove il backup e avvisa tutti i client — TRASPARENTE: nessuna azione richiesta
-        al giocatore, la connessione TCP con il proxy era gia' aperta da prima."""
+        """Promuove il backup e avvisa tutti i client"""
         try:
             ctrl = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             ctrl.settimeout(3.0)
@@ -130,11 +128,6 @@ class MatchProxy:
         print(f"{LOG_PREFIX}[Proxy] Failover completato. Nuovo primary sulla porta UDP {self.backup_port}.")
 
     def _shutdown(self):
-        """Chiude tutto: il processo ancora vivo (se per caso ce n'e' uno, es. il backup mai
-        promosso quando e' il primary a finire per primo), le connessioni con i client, e infine
-        segnala al thread principale di terminare il processo del proxy stesso — e' SOLO a
-        questo punto che matchmaking_server.py, controllando se il proxy e' ancora vivo, si
-        accorge che la partita e' davvero conclusa e la toglie dalla lista."""
         for proc in (self.primary_process, self.backup_process):
             if proc is not None and proc.poll() is None:
                 try:
