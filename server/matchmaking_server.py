@@ -68,6 +68,20 @@ def find_game_of(player_id):
     return "NOT_FOUND"
 
 
+def _recv_line(conn, max_bytes=65536):
+    """Legge un messaggio TCP delimitato da newline, senza presumere che recv() basti."""
+    data = bytearray()
+    while b"\n" not in data:
+        chunk = conn.recv(min(4096, max_bytes + 1 - len(data)))
+        if not chunk:
+            raise ConnectionError("Connessione chiusa prima del terminatore TCP.")
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise ValueError("Messaggio TCP troppo grande.")
+    line, _, _rest = bytes(data).partition(b"\n")
+    return line
+
+
 def _close(conn):
     try:
         conn.close()
@@ -100,7 +114,7 @@ def _start_game(group):
     write_status()
     for pid, _, _, c in group:
         try:
-            c.sendall(f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_tcp_port}".encode())
+            c.sendall((f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_tcp_port}" + "\n").encode())
             c.close()
         except Exception as e:
             print(f"{LOG_PREFIX} Failed to notify client {pid}: {e}")
@@ -121,9 +135,9 @@ def _wait_in_queue(conn, entry):
 def handle_client(conn, addr):
     entry = None
     try:
-        info = json.loads(conn.recv(2048).decode())
+        info = json.loads(_recv_line(conn).decode())
         if "rejoin_id" in info:                                   # rientro in partita
-            _send(conn, find_game_of(info["rejoin_id"]).encode())
+            _send(conn, (find_game_of(info["rejoin_id"]) + "\n").encode())
             _close(conn)
             return
         player_id, udp_port = info.get("id"), info.get("udp_port")
@@ -133,7 +147,7 @@ def handle_client(conn, addr):
         with port_lock:
             if any(p[0] == player_id for p in pending_clients):
                 print(f"{LOG_PREFIX} Player {player_id} rifiutato: id gia' in coda.")
-                _send(conn, b"ID_COLLISION")
+                _send(conn, b"ID_COLLISION\n")
                 _close(conn)
                 return
             pending_clients.append(entry)
@@ -143,7 +157,7 @@ def handle_client(conn, addr):
                 del pending_clients[:MAX_PLAYERS]
                 _start_game(group)
                 return                                           
-            if not _send(conn, b"WAIT"):                          # sotto lock: WAIT parte sempre prima di un eventuale GAME
+            if not _send(conn, b"WAIT\n"):                          # sotto lock: WAIT parte sempre prima di un eventuale GAME
                 _remove_from_queue(entry, "connessione persa mentre mandavo WAIT")
                 return
 
