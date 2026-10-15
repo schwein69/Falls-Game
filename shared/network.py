@@ -5,7 +5,21 @@ import json
 import time
 from config import P2P_PORT, MAX_PLAYERS, SPAWN_HEIGHT, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, REJOIN_TIMER
 
-REJOIN_LOAD_TIMEOUT = 30   
+REJOIN_LOAD_TIMEOUT = 30
+
+
+def _recv_tcp_line(sock, max_bytes=65536):
+    """Legge una singola riga TCP; recv() puo restituire dati parziali."""
+    data = bytearray()
+    while b"\n" not in data:
+        chunk = sock.recv(min(4096, max_bytes + 1 - len(data)))
+        if not chunk:
+            raise ConnectionError("Connessione chiusa prima del terminatore TCP.")
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise ValueError("Messaggio TCP troppo grande.")
+    line, _, _rest = bytes(data).partition(b"\n")
+    return line
 
 class Room:
     def __init__(self):
@@ -98,7 +112,7 @@ class NetworkManager:
 
     def _tcp_join_handshake(self, ip, port, my_udp_port, rejoin_id, max_seconds=15):
         deadline = time.time() + max_seconds
-        req = json.dumps({"udp_port": my_udp_port, "rejoin_id": rejoin_id}).encode()
+        req = (json.dumps({"udp_port": my_udp_port, "rejoin_id": rejoin_id}) + "\n").encode()
         last_error = None
         while self.running and self.join_rejected is None and time.time() < deadline:
             try:
@@ -106,7 +120,7 @@ class NetworkManager:
                     tcp.settimeout(5)
                     tcp.connect((ip, port))
                     tcp.sendall(req)
-                    data = tcp.recv(1024).decode()
+                    data = _recv_tcp_line(tcp).decode()
                 resp = json.loads(data)
                 if "error" in resp:
                     self.join_rejected = {"ROOM_FULL": "La stanza e' piena.",
@@ -164,7 +178,7 @@ class NetworkManager:
         existing_pids = []
         try:
             conn.settimeout(5)
-            req = json.loads(conn.recv(1024).decode().strip())
+            req = json.loads(_recv_tcp_line(conn).decode())
             rejoin_id = req.get("rejoin_id")
             client_addr = (addr[0], req["udp_port"])
 
@@ -172,7 +186,7 @@ class NetworkManager:
                 if rejoin_id is not None and rejoin_id in room.pending_ids:   # rientro dopo una migrazione
                     room.clients[client_addr] = rejoin_id
                     room.pending_ids.discard(rejoin_id)
-                    conn.sendall(json.dumps({"id": rejoin_id}).encode())
+                    conn.sendall((json.dumps({"id": rejoin_id}) + "\n").encode())
                     print(f"[Host] Player {rejoin_id} rientrato dopo migrazione dell'host.")
                     if room.on_join:
                         room.on_join(rejoin_id, client_addr)
@@ -192,26 +206,26 @@ class NetworkManager:
                         return
 
                 if client_addr in room.clients:            # richiesta ripetuta: stessa risposta
-                    conn.sendall(json.dumps({"id": room.clients[client_addr]}).encode())
+                    conn.sendall((json.dumps({"id": room.clients[client_addr]}) + "\n").encode())
                     return
 
                 if room.closed:                            # partita iniziata: solo i rientri (gestiti sopra)
-                    conn.sendall(json.dumps({"error": "MATCH_STARTED"}).encode())
+                    conn.sendall((json.dumps({"error": "MATCH_STARTED"}) + "\n").encode())
                     return
 
                 if rejoin_id is not None and not room.expected:   # P2P: quel posto non esiste piu'
-                    conn.sendall(json.dumps({"error": "REJOIN_EXPIRED"}).encode())
+                    conn.sendall((json.dumps({"error": "REJOIN_EXPIRED"}) + "\n").encode())
                     return
 
                 if room.is_full():
                     print(f"[Host] Stanza piena, connessione rifiutata da {client_addr}")
-                    conn.sendall(json.dumps({"error": "ROOM_FULL"}).encode())
+                    conn.sendall((json.dumps({"error": "ROOM_FULL"}) + "\n").encode())
                     return
 
                 if room.expected:                          # Online: entrano solo gli indirizzi attesi
                     if client_addr not in room.expected:
                         print(f"[Host] Connessione non autorizzata rifiutata da {client_addr}")
-                        conn.sendall(json.dumps({"error": "UNAUTHORIZED"}).encode())
+                        conn.sendall((json.dumps({"error": "UNAUTHORIZED"}) + "\n").encode())
                         return
                     new_id = room.expected[client_addr]
                 else:
@@ -222,7 +236,7 @@ class NetworkManager:
                 if room.host_plays:
                     existing_pids.append(self.player_id)
                 room.clients[client_addr] = new_id
-                conn.sendall(json.dumps({"id": new_id}).encode())
+                conn.sendall((json.dumps({"id": new_id}) + "\n").encode())
         except Exception as e:
             print(f"[Host] Errore nella richiesta di ingresso da {addr}: {e}")
             return
