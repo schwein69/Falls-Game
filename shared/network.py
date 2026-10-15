@@ -197,7 +197,7 @@ class NetworkManager:
                     if old_addr is not None:
                         was_paused = old_addr in room.silent
                         room.move(old_addr, client_addr, rejoin_id)
-                        conn.sendall(json.dumps({"id": rejoin_id}).encode())
+                        conn.sendall((json.dumps({"id": rejoin_id}) + "\n").encode())
                         print(f"[Host] Player {rejoin_id} e' rientrato ({old_addr[1]} -> {client_addr[1]}).")
                         if room.on_join:
                             room.on_join(rejoin_id, client_addr)
