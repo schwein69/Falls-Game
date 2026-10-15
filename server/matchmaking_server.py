@@ -64,7 +64,7 @@ def find_game_of(player_id):
     with port_lock:
         for proxy_port, game in active_games.items():
             if player_id in game["players"]:
-                return f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_port}"
+                return f"GAME:{GAME_PUBLIC_HOST}:{proxy_port}"
     return "NOT_FOUND"
 
 
@@ -114,7 +114,7 @@ def _start_game(group):
     write_status()
     for pid, _, _, c in group:
         try:
-            c.sendall((f"GAME:{MATCHMAKING_HOSTNAME}:{proxy_tcp_port}" + "\n").encode())
+            c.sendall((f"GAME:{GAME_PUBLIC_HOST}:{proxy_tcp_port}" + "\n").encode())
             c.close()
         except Exception as e:
             print(f"{LOG_PREFIX} Failed to notify client {pid}: {e}")
