@@ -27,14 +27,12 @@ def _matchmaking_handshake(nm):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
             tcp.settimeout(15)
             tcp.connect((MATCHMAKING_HOSTNAME, MATCHMAKING_TCP_PORT))
-            tcp.sendall(json.dumps({"id": my_label, "udp_port": local_udp_port}).encode())
+            tcp.sendall((json.dumps({"id": my_label, "udp_port": local_udp_port}) + "\n").encode())
             nm.online.status = "queued"
 
-            while True:                      
-                data = tcp.recv(1024)
-                if not data:
-                    raise ConnectionError("Il matchmaking server ha chiuso la connessione.")
-                msg = data.decode().strip()
+            buf = bytearray()
+            while True:
+                msg = _read_line(tcp, buf).decode().strip()
                 if msg == "ID_COLLISION":
                     raise ConnectionError("Id gia' in coda con un altro giocatore: riprova.")
                 if msg.startswith("GAME:"):
@@ -63,8 +61,8 @@ def _rejoin_handshake(nm, player_id):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
             tcp.settimeout(10)
             tcp.connect((MATCHMAKING_HOSTNAME, MATCHMAKING_TCP_PORT))
-            tcp.sendall(json.dumps({"rejoin_id": player_id}).encode())
-            answer = tcp.recv(1024).decode().strip()
+            tcp.sendall((json.dumps({"rejoin_id": player_id}) + "\n").encode())
+            answer = _read_line(tcp, bytearray()).decode().strip()
         if answer == "NOT_FOUND":
             raise ConnectionError("La partita non esiste piu'.")
         if not answer.startswith("GAME:"):   
