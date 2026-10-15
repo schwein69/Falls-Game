@@ -5,6 +5,7 @@ from config import P2P_PORT
 
 MAX_LOCAL_HOSTS = 10
 
+
 def _bind_to_first_free_port(nm, player_id=0):
     for offset in range(MAX_LOCAL_HOSTS):
         candidate_port = P2P_PORT + offset
@@ -24,7 +25,7 @@ def _become_host(player_id=0, restore=None, pending_ids=()):
     nm.room.closed = restore is not None       # dopo una migrazione la partita e' gia' iniziata
 
     authority = GameAuthority()
-    if restore is not None:                   
+    if restore is not None:                    # migrazione: stato visto dal client promosso (best effort)
         floor_seed, destroyed_blocks, player_positions = restore
         if floor_seed is not None:
             authority.floor_seed = floor_seed
@@ -53,7 +54,7 @@ def start_p2p_host():
 def join_p2p_host(ip, port, rejoin_id=None):
     nm = NetworkManager()
     nm.allow_host_migration = True
-    nm.join_network(ip, port, rejoin_id=rejoin_id)    # rejoin_id: l'id di chi rientra (vedi rejoin_store)
+    nm.join_network(ip, port, rejoin_id=rejoin_id)   
     return nm
 
 

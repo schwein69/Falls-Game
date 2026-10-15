@@ -35,8 +35,7 @@ class GameAuthority:
 
     # Pavimento
     def handle_block_step(self, pid, block_id):
-        """Un client segnala di essere passato sul blocco block_id. Ritorna il payload da
-        trasmettere a tutti se e' la prima volta che viene distrutto, altrimenti None."""
+        """Un client segnala di essere passato sul blocco block_id."""
         if block_id is None:
             return None
         if block_id in self.destroyed_blocks:
@@ -62,6 +61,42 @@ class GameAuthority:
 
     def snapshot_payload(self):
         return {pid: list(pos) for pid, pos in self.player_positions.items()}
+
+    def apply(self, sender, method, args, internal=False):
+        """Applica una richiesta ("update_pos", "block_step", "player_died", "player_left")."""
+        pid = args[0] if internal and args else sender
+        out = pid in self.dead_players or pid in self.left_players       
+        events = []
+        try:
+            if method == "update_pos":
+                _, x, y, z = args
+                if not out and all(isinstance(v, (int, float)) for v in (x, y, z)):
+                    self.handle_update_pos(pid, x, y, z)
+                return False, events          # le posizioni viaggiano negli snapshot, non servono eventi
+
+            if method == "block_step":
+                _, block_id = args
+                if out or not isinstance(block_id, int):
+                    return False, events
+                result = self.handle_block_step(pid, block_id)
+                if result:
+                    events.append(("block_destroyed", (result["block_id"], result["pid"])))
+                return result is not None, events
+
+            if method == "player_died":
+                if out:
+                    return False, events
+                game_over, winner = self.handle_player_died(pid)
+                events.append(("player_removed", (pid,)))
+            elif method == "player_left":
+                game_over, winner = self.remove_player(pid)
+            else:
+                return False, events
+            if game_over:
+                events.append(("game_won", (winner,)))
+            return True, events
+        except (ValueError, TypeError):       # argomenti sbagliati: li ignoro
+            return False, []
 
     def to_dict(self):
         """Serializza lo stato dell'autorita' in un dizionario, da trasmettere a un backup."""

@@ -35,14 +35,16 @@ def _matchmaking_handshake(nm):
                 if not data:
                     raise ConnectionError("Il matchmaking server ha chiuso la connessione.")
                 msg = data.decode().strip()
+                if msg == "SERVER_FULL":
+                    raise ConnectionError("Il server e' pieno: riprova tra poco.")
                 if msg == "ID_COLLISION":
                     raise ConnectionError("Id gia' in coda con un altro giocatore: riprova.")
                 if msg.startswith("GAME:"):
                     break
 
         _, host, port_str = msg.split(":")
-        print(f"[Network] Match trovato! Mi connetto al proxy {host}:{port_str}")
-        _connect_via_proxy(nm, host, int(port_str))
+        print(f"[Network] Match trovato! Mi connetto al supervisor {host}:{port_str}")
+        _connect_via_supervisor(nm, host, int(port_str))
         nm.online.status = "matched"
 
     except Exception as e:
@@ -70,7 +72,7 @@ def _rejoin_handshake(nm, player_id):
         if not answer.startswith("GAME:"):   
             raise ConnectionError("Il matchmaking non supporta il rientro: aggiorna matchmaking_server.py e riavvialo.")
         _, host, port_str = answer.split(":")
-        _connect_via_proxy(nm, host, int(port_str), rejoin_id=player_id)
+        _connect_via_supervisor(nm, host, int(port_str), rejoin_id=player_id)
         nm.online.status = "matched"
     except Exception as e:
         print(f"[Network] Rientro fallito: {e}")
@@ -82,43 +84,44 @@ def _read_line(sock, buf):
     while b"\n" not in buf:
         chunk = sock.recv(4096)
         if not chunk:
-            raise ConnectionError("Il proxy ha chiuso la connessione.")
+            raise ConnectionError("Il supervisor ha chiuso la connessione.")
         buf += chunk
     line, _, rest = bytes(buf).partition(b"\n")
     buf[:] = rest
     return json.loads(line)
 
 
-def _connect_via_proxy(nm, proxy_host, proxy_port, connect_timeout=10, rejoin_id=None):
+def _connect_via_supervisor(nm, supervisor_host, supervisor_port, connect_timeout=10, rejoin_id=None):
     deadline = time.time() + connect_timeout
     while True:                  
         sock, buf = socket.socket(socket.AF_INET, socket.SOCK_STREAM), bytearray()
         try:
             sock.settimeout(2)
-            sock.connect((proxy_host, proxy_port))
+            sock.connect((supervisor_host, supervisor_port))
             info = _read_line(sock, buf)
             break
         except Exception as e:
             sock.close()
             if time.time() >= deadline:
-                raise ConnectionError(f"Impossibile connettersi al proxy dopo {connect_timeout}s: {e}")
+                raise ConnectionError(f"Impossibile connettersi al supervisor dopo {connect_timeout}s: {e}")
             time.sleep(0.3)
 
-    nm.online.proxy_sock = sock    # serve anche per chiuderlo in stop()
+    nm.online.supervisor_sock = sock    # serve anche per chiuderlo in stop()
     sock.settimeout(None)
-    print(f"[Network] Il proxy indica il primary su {proxy_host}:{info['primary_port']}. Mi unisco.")
-    nm.join_network(proxy_host, info["primary_port"], rejoin_id=rejoin_id)  
+    print(f"[Network] Il supervisor indica il primary su {supervisor_host}:{info['primary_port']}. Mi unisco.")
+    nm.join_network(supervisor_host, info["primary_port"], rejoin_id=rejoin_id)   # l'host e' quello con cui ho raggiunto il supervisor
+
     def _listen_for_failover():
         while True:
             try:
                 info = _read_line(sock, buf)
             except Exception as e:
-                print(f"[Network] Connessione col proxy interrotta: {e}")
+                print(f"[Network] Connessione col supervisor interrotta: {e}")
                 return
-            if "new_primary_host" in info:
+            if "new_primary_port" in info:
                 print(f"[Network] Il primary e' cambiato (failover): mi riaggancio con lo stesso ID ({nm.player_id}).")
                 nm.last_host_seen = time.time()
-                nm.join_network(proxy_host, info["new_primary_port"], rejoin_id=nm.player_id)
+                nm.join_network(supervisor_host, info["new_primary_port"], rejoin_id=nm.player_id)
 
     threading.Thread(target=_listen_for_failover, daemon=True).start()
 

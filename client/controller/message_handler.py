@@ -6,38 +6,54 @@ from player import RemotePlayer
 import rejoin_store
 
 
+AUTHORITY_METHODS = ("update_pos", "block_step", "player_died") 
+
+
 class MessageHandlers:
-    # ---------------- invio e smistamento ----------------
     def _host_authority(self):
-        """La GameAuthority se siamo l'host/server (solo lui valida), altrimenti None."""
         m = self.model
         return m.game_authority if m.network_manager and m.network_manager.is_host else None
 
-    def _to_authority(self, local_handler, method, *args):
+    def _to_authority(self, method, *args):
         """Manda una richiesta all'autorita': applicata subito se siamo noi l'host, altrimenti via rete."""
         nm = self.model.network_manager
         if not nm or nm.player_id is None:
             return
         if nm.is_host:
-            local_handler(nm.player_id, *args)
+            self._apply_to_authority(nm.player_id, method, [nm.player_id, *args])
         else:
             nm.send_message(method, nm.player_id, *args)
 
+    def _apply_to_authority(self, sender, method, args):
+        auth = self._host_authority()
+        if auth is None:
+            return
+        nm = self.model.network_manager
+        _, events = auth.apply(sender, method, args, internal=sender in (0, nm.player_id))   
+        for name, event_args in events:
+            getattr(self, "on_" + name)(*event_args)
+            nm.broadcast_message(name, *event_args)
+
     def request_block_step(self, block_id):
-        self._to_authority(self.on_block_step, "block_step", block_id)
+        self._to_authority("block_step", block_id)
 
     def request_player_died(self):
-        self._to_authority(self.on_player_died, "player_died")
+        self._to_authority("player_died")
 
     def handle_message(self, data):
-        """Un messaggio dalla rete, {"method": "block_step", "args": [...]}, chiama self.on_block_step(*args)."""
-        handler = getattr(self, "on_" + str(data.get("method")), None)
+        method = str(data.get("method"))
+        nm = self.model.network_manager
+        if method == "player_left" and nm and nm.is_host and data.get("sender_id") not in (0, nm.player_id):
+            return                                                       
+        if method in AUTHORITY_METHODS:
+            self._apply_to_authority(data.get("sender_id"), method, data.get("args", []))
+            return
+        handler = getattr(self, "on_" + method, None)
         if handler is not None:
             handler(*data.get("args", []))
 
     # ---------------- giocatori e pavimento ----------------
     def on_spawn_player(self, pid, x, y, z, status="alive", matchId=None):
-        """Un altro giocatore e' entrato: creiamo (o spostiamo) la sua RemotePlayer."""
         m = self.model
         nm = m.network_manager
         if nm and pid != nm.player_id:
@@ -49,13 +65,8 @@ class MessageHandlers:
                 print(f"[Game] Spawning Remote Player {pid}")
                 m.other_players[pid] = RemotePlayer(position=Vec3(x, y, z), username=f"Player {pid}")
 
-    def on_update_pos(self, pid, x, y, z):
-        auth = self._host_authority()
-        if auth is not None:
-            auth.handle_update_pos(pid, x, y, z)
-
     def on_state_snapshot(self, positions):
-        """Posizioni di tutti, a intervalli fissi. Le chiavi arrivano come stringhe (JSON)."""
+        """Posizioni di tutti, a intervalli fissi."""
         m = self.model
         nm = m.network_manager
         for pid_str, pos in positions.items():
@@ -66,15 +77,6 @@ class MessageHandlers:
                 m.other_players[pid].position = Vec3(*pos)
             elif m.level_loaded:
                 self.on_spawn_player(pid, *pos)
-
-    def on_block_step(self, pid, block_id):
-        """Solo l'host valida: un blocco gia' distrutto da altri viene ignorato."""
-        auth = self._host_authority()
-        result = auth.handle_block_step(pid, block_id) if auth is not None else None
-        if result is None:
-            return
-        self.on_block_destroyed(result["block_id"], result["pid"])
-        self.model.network_manager.broadcast_message("block_destroyed", result["block_id"], result["pid"])
 
     def on_block_destroyed(self, block_id, pid):
         """Distrugge il blocco; l'effetto sul giocatore vale solo se l'ha calpestato lui."""
@@ -107,25 +109,12 @@ class MessageHandlers:
         self.on_state_snapshot(positions)
 
     # ---------------- vita, morte e vittoria ----------------
-    def on_player_died(self, pid):
-        """Solo l'host/server decide chi e' ancora vivo."""
-        auth = self._host_authority()
-        if auth is None:
-            return
-        game_over, winner_pid = auth.handle_player_died(pid)
-        self.on_player_removed(pid)
-        self.model.network_manager.broadcast_message("player_removed", pid)
-        if game_over:
-            self.on_game_won(winner_pid)
-            self.model.network_manager.broadcast_message("game_won", winner_pid)
-
     def on_player_removed(self, pid):
         other = self.model.other_players.pop(pid, None)
         if other is not None:
             destroy(other)
 
     def on_game_won(self, winner_pid):
-        """Schermata di fine partita. winner_pid None = nessun vincitore (es. muoiono tutti insieme)."""
         m = self.model
         if m.game_over:
             return
@@ -154,11 +143,8 @@ class MessageHandlers:
         if pid in m.other_players:
             print(f"[Game] Player {pid} Left")
             destroy(m.other_players.pop(pid))
-        if m.level_loaded and m.game_authority is not None:
-            game_over, winner_pid = m.game_authority.remove_player(pid)
-            if game_over and m.network_manager:
-                self.on_game_won(winner_pid)
-                m.network_manager.broadcast_message("game_won", winner_pid)
+        if m.level_loaded and m.network_manager:                       
+            self._apply_to_authority(m.network_manager.player_id, "player_left", [pid])
 
     # ---------------- ciclo della partita ----------------
     def on_start_game(self, seed=None):
@@ -182,18 +168,14 @@ class MessageHandlers:
             self._begin_countdown()
 
     def on_start_countdown(self):
-        """Parte il 3-2-1, poi la gravita'. A orologio e non con invoke(delay): dopo un caricamento
-        lungo il primo time.dt e' enorme e il "3" durerebbe un frame."""
-        if self._countdown_end is None and not self.model.level_loaded:   # un secondo annuncio non lo riavvia
+        if self._countdown_end is None and not self.model.level_loaded:  
             self._countdown_end = time.time() + 3
             self._countdown_shown = None
             print("[Game] Countdown 3-2-1 avviato.")
 
     def on_game_pause(self, is_paused, pid=None):
-        """application.pause() ferma tutto (anche il movimento): alla ripresa ognuno e' dov'era.
-        La rete gira da update_network (ignore_paused), cosi' la ripresa arriva comunque."""
         if getattr(self.model, 'rejoin_pending', False):
-            return                            # chi sta ancora rientrando non fa parte della pausa
+            return                            
         self._destroy_tagged('pause_text')
         if is_paused:
             Text(f"Waiting for Player {pid} to reconnect...", scale=1.5, origin=(0, 0), y=0.1,

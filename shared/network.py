@@ -10,16 +10,16 @@ REJOIN_LOAD_TIMEOUT = 30
 class Room:
     def __init__(self):
         self.clients = {}           # (ip, porta UDP) -> player_id
-        self.last_seen = {}         # (ip, porta) -> istante dell'ultimo pacchetto ricevuto
-        self.silent = {}            # (ip, porta) -> (player_id, istante): in pausa, in attesa di rientro
+        self.last_seen = {}         
+        self.silent = {}            
         self.rejoining = {}         
-        self.expected = {}          # Online: (ip, porta) -> player_id, decisi dal matchmaking
-        self.pending_ids = set()    # P2P: id che possono rientrare dopo una migrazione dell'host
-        self.next_id = 1            # P2P: prossimo id da assegnare
-        self.host_plays = False     # True per l'host P2P (e' anche un giocatore), False per il server online
-        self.match_started = False  
+        self.expected = {}          
+        self.pending_ids = set()  
+        self.next_id = 1            
+        self.host_plays = False     
+        self.match_started = False 
         self.closed = False         
-        self.on_join = None         # callback(pid, addr): manda lo stato a chi entra
+        self.on_join = None        
 
     def is_full(self):
         return len(self.clients) + 1 + (1 if self.host_plays else 0) > MAX_PLAYERS
@@ -29,14 +29,21 @@ class Room:
         return next((a for a, p in self.clients.items() if p == pid and (ip is None or a[0] == ip)), None)
 
     def forget(self, addr, pid):
-        """Rimuove un client"""
+        """Toglie un client da tutte le tabelle."""
         self.clients.pop(addr, None)
         self.last_seen.pop(addr, None)
         self.silent.pop(addr, None)
         self.rejoining.pop(pid, None)
 
+    def rebind(self, old_addr, new_addr, pid):
+        self.clients.pop(old_addr, None)
+        self.last_seen.pop(old_addr, None)
+        self.clients[new_addr] = pid
+        self.last_seen[new_addr] = time.time()
+        if old_addr in self.silent:
+            self.silent[new_addr] = self.silent.pop(old_addr)
+
     def move(self, old_addr, new_addr, pid):
-        """Il giocatore rientra da un nuovo processo e sostituisce il vecchio indirizzo."""
         self.forget(old_addr, pid)
         self.clients[new_addr] = pid
         self.last_seen[new_addr] = time.time()
@@ -44,12 +51,10 @@ class Room:
 
 
 class OnlineStatus:
-    """SOLO client Online: a che punto e' il collegamento (matchmaking, poi proxy)."""
-
     def __init__(self):
         self.status = "idle"        # idle -> connecting -> queued -> matched -> error
         self.error = None
-        self.proxy_sock = None      # connessione al proxy: resta aperta per seguire un failover
+        self.supervisor_sock = None      # connessione al supervisor: resta aperta per seguire un failover
 
 
 class NetworkManager:
@@ -61,7 +66,7 @@ class NetworkManager:
         self.is_host = False
         self.host_ip = None                 # l'host/server a cui siamo collegati
         self.host_port = P2P_PORT           # (se siamo host: la nostra porta)
-        self.join_rejected = None           
+        self.join_rejected = None           # None se tutto ok, altrimenti il motivo del rifiuto
         self.last_host_seen = time.time()   # solo client: ultimo segnale dall'host
         self.allow_host_migration = False   # P2P: se l'host sparisce se ne elegge un altro
         self.leaving_deliberately = False   # True: stop() manda LEAVE (definitivo) invece di DISCONNECT
@@ -74,16 +79,13 @@ class NetworkManager:
         self._tick_thread = None
         self._heartbeat_thread = None
 
-    # ---------------- collegamento ----------------
     def prepare_local_socket(self):
-        """Crea il socket UDP locale (se manca) e ne restituisce la porta."""
         if self.sock is None:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.bind(('', 0))
         return self.sock.getsockname()[1]
 
     def join_network(self, ip, port, rejoin_id=None):
-        """Ci uniamo come client a un host (P2P) o a un server dedicato (Online)."""
         self.is_host = False
         self.host_ip = ip
         self.host_port = port
@@ -117,6 +119,8 @@ class NetworkManager:
                     return
                 self.player_id = resp["id"]
                 print(f"[Network] Connesso con successo. Il mio ID: {self.player_id}")
+                if self.online.supervisor_sock is not None:         # solo Online: in P2P non c'e' NAT da attraversare
+                    threading.Thread(target=self._send_hellos, daemon=True).start()
                 return
             except Exception as e:
                 last_error = e
@@ -124,6 +128,13 @@ class NetworkManager:
         if self.running and self.join_rejected is None:
             self.join_rejected = f"Impossibile connettersi all'host: {last_error}"
             print(f"[Network] {self.join_rejected}")
+
+    def _send_hellos(self):
+        for _ in range(8):
+            if not self.running:
+                return
+            self.send_message("hello")
+            time.sleep(0.25)
 
     def setup_host(self, port=None, player_id=0):
         self.is_host = True
@@ -147,6 +158,7 @@ class NetworkManager:
         threading.Thread(target=self._accept_join_loop, daemon=True).start()
         print(f"[Network] Host/server avviato sulla porta {bind_port} (player_id={player_id})")
 
+    # ---------------- ingresso (solo host) ----------------
     def _accept_join_loop(self):
         """Accetta le connessioni TCP in ingresso, ognuna in un thread a parte."""
         while self.running:
@@ -250,6 +262,7 @@ class NetworkManager:
         self.send_raw(json.dumps({"method": method_name, "args": args, "sender_id": self.player_id}))
 
     def send_raw(self, msg: str):
+        # Dopo stop() non si manda piu' nulla: un heartbeat dopo il "DISCONNECT" sembrerebbe un ritorno.
         if not self.sock or not self.running:
             return
         encoded = msg.encode()
@@ -264,6 +277,7 @@ class NetworkManager:
             print(f"[Network] Errore invio: {e}")
 
     def send_to(self, addr, method_name, *args):
+        """Un messaggio a UN solo client (per indirizzo): lo stato per chi si e' appena unito o riconnesso."""
         if not self.sock:
             return
         data = {"method": method_name, "args": args, "sender_id": self.player_id}
@@ -273,6 +287,7 @@ class NetworkManager:
             print(f"[Network] Errore invio a {addr}: {e}")
 
     def broadcast_message(self, method_name, *args, exclude_pid=None):
+        """Un nuovo messaggio dall'host/server a tutti i client (opzionalmente escluso un player_id)."""
         if not self.sock:
             return
         raw = json.dumps({"method": method_name, "args": args, "sender_id": self.player_id}).encode()
@@ -282,12 +297,14 @@ class NetworkManager:
                     self.sock.sendto(raw, addr)
 
     def relay_broadcast(self, raw_msg, exclude_addr):
+        """Rilancia un messaggio gia' serializzato a tutti i client tranne il mittente."""
         with self.lock:
             for addr in self.room.clients.keys():
                 if addr != exclude_addr:
                     self.sock.sendto(raw_msg.encode(), addr)
 
     def start_broadcast_tick(self, get_payload_fn, method_name="state_snapshot", interval=0.05):
+        """Thread che a intervalli fissi trasmette a tutti lo stato di get_payload_fn() (le posizioni)."""
         if self._tick_thread is not None:
             return
 
@@ -304,7 +321,7 @@ class NetworkManager:
         self._tick_thread.start()
 
     def start_heartbeat(self, interval=HEARTBEAT_INTERVAL):
-        """Solo host: segnale di vita ai client e controllo di chi e' silenzioso."""
+        """Solo host: segnale di vita ai client (cosi' notano se sparisce) e controllo di chi e' silenzioso."""
         if self._heartbeat_thread is not None:
             return
 
@@ -320,16 +337,12 @@ class NetworkManager:
         self._heartbeat_thread = threading.Thread(target=_loop, daemon=True)
         self._heartbeat_thread.start()
 
-    # ---------------- presenza e pausa (solo host) ----------------
     def _announce_pause(self, is_paused, pid):
-        """Pausa/ripresa per tutti."""
         self.broadcast_message("game_pause", is_paused, pid)
         if self.room.host_plays:
             self.msg_queue.put({"method": "game_pause", "args": [is_paused, pid], "sender_id": 0})
 
     def check_client_liveness(self, timeout=HEARTBEAT_TIMEOUT, grace_period=REJOIN_TIMER):
-        """Solo host: un client silenzioso oltre 'timeout' mette in pausa tutti per 'grace_period' s,
-        poi viene rimosso."""
         room = self.room
         if not room.match_started:
             return
@@ -367,7 +380,6 @@ class NetworkManager:
         """Solo client: True se abbiamo sentito l'host negli ultimi 'timeout' secondi."""
         return self.is_host or (time.time() - self.last_host_seen) < timeout
 
-    # ---------------- ricezione ----------------
     def receive_loop(self):
         while self.running:
             try:
@@ -397,8 +409,10 @@ class NetworkManager:
                 self.send_message("client_heartbeat")
 
             if self.is_host:
-                claimed_pid = payload.get("sender_id")             # anti-spoofing: il mittente e' chi dice di essere?
+                claimed_pid = payload.get("sender_id")             
                 real_pid = room.clients.get(addr)
+                if real_pid is None and payload.get("method") == "hello":
+                    real_pid = self._learn_address(addr, claimed_pid)
                 if real_pid is None or claimed_pid != real_pid:
                     print(f"[Host] Pacchetto rifiutato da {addr}: dichiara pid={claimed_pid}, "
                           f"registrato come pid={real_pid}")
@@ -408,17 +422,37 @@ class NetworkManager:
                     print(f"[Host] Player {real_pid} e' rientrato.")
                     del room.silent[addr]
                     self._announce_pause(False, real_pid)
-                if payload.get("method") == "rejoin_done":         # ha finito di caricare: si riparte per tutti
+                if payload.get("method") == "hello":              
+                    return
+                if payload.get("method") == "rejoin_done":         
                     if room.rejoining.pop(real_pid, None) is not None:
                         self._announce_pause(False, real_pid)
                     return
-                if payload.get("method") == "spawn_player":        # i client parlano solo con l'host: lo rilancia agli altri
+                if payload.get("method") == "spawn_player":      
                     self.relay_broadcast(msg, exclude_addr=addr)
 
             if payload.get("sender_id") != self.player_id:
                 self.msg_queue.put(payload)
         except Exception:
             pass
+
+    def _learn_address(self, addr, pid):
+        room = self.room
+        if not room.expected:
+            return None                                    #
+        with self.lock:
+            old_addr = room.addr_of(pid, ip=addr[0])
+            if old_addr is None:
+                return None
+            room.rebind(old_addr, addr, pid)
+            others = [p for p in room.clients.values() if p != pid]
+        print(f"[Host] Player {pid}: indirizzo UDP reale {addr[1]} (dichiarato {old_addr[1]}).")
+        if pid not in room.rejoining:                      # chi rientra riceve lo stato, non gli spawn
+            for other in others:
+                self.send_to(addr, "spawn_player", other, 0, SPAWN_HEIGHT, 0)
+        if room.on_join:
+            room.on_join(pid, addr)
+        return pid
 
     def handle_internal_messages(self, msg, addr):
         """"LEAVE": uscita volontaria, definitiva. "DISCONNECT": finestra chiusa; in partita pausa e
@@ -448,7 +482,7 @@ class NetworkManager:
 
     def stop(self):
         self.running = False
-        for owner, name in ((self, "join_tcp_sock"), (self.online, "proxy_sock")):
+        for owner, name in ((self, "join_tcp_sock"), (self.online, "supervisor_sock")):
             sock = getattr(owner, name)
             if sock:
                 try:

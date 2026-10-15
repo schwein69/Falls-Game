@@ -19,8 +19,7 @@ def get_redis_client():
 
 
 def load_status(client):
-    """Legge e decodifica lo stato da Redis. None se la chiave non esiste ancora (matchmaking
-    server non ancora avviato, o mai arrivato un client) o se Redis non e' raggiungibile."""
+    """Legge e decodifica lo stato da Redis."""
     try:
         raw = client.get(STATUS_KEY)
         if raw is None:
@@ -39,11 +38,8 @@ def render(placeholder):
         client = get_redis_client()
         status, error = load_status(client)
 
-        if error:
+        if error or status is None:
             st.error(error)
-            return
-        if status is None:
-            st.info("Nessuno stato ancora pubblicato — il matchmaking server è acceso?")
             return
 
         pending = status.get("pending", [])

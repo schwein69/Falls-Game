@@ -589,5 +589,189 @@ class TestClosedRoom(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(again.player_id, old_id)
 
+class TestNatAddressLearning(unittest.TestCase):
+    """Online dietro NAT: il client dichiara via TCP una porta UDP, ma i pacchetti partono da un'altra.
+    Qui lo simuliamo dichiarando una porta diversa da quella del socket vero."""
+
+    def setUp(self):
+        self.port = _next_port()
+        self.client = NetworkManager()
+        real = self.client.prepare_local_socket()
+        self.real_addr = ("127.0.0.1", real)
+        self.declared = real + 1000
+        self.client.prepare_local_socket = lambda: self.declared      # dichiara una porta che non e' la sua
+        self.client.online.supervisor_sock = socket.socket()               # come un client Online (invia gli hello)
+        self.server = NetworkManager()
+        self.server.room.expected = {("127.0.0.1", self.declared): 77}
+        self.server.setup_host(port=self.port)
+        self.server.room.on_join = lambda pid, addr: self.server.send_to(addr, "sync_state", [5], {}, 123)
+
+    def tearDown(self):
+        self.client.stop()
+        self.server.stop()
+
+    def test_server_learns_real_address_and_resends_state(self):
+        self.client.join_network("127.0.0.1", self.port)
+        deadline = time.time() + 4
+        while self.real_addr not in self.server.room.clients and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.server.room.clients.get(self.real_addr), 77)
+        self.assertNotIn(("127.0.0.1", self.declared), self.server.room.clients, "niente voce fantasma")
+        methods = _collect_methods(self.client, timeout=0.5)
+        self.assertIn("sync_state", methods, "lo stato mandato alla porta sbagliata va rimandato a quella vera")
+        self.client.send_message("update_pos", 77, 1, 2, 3)           # ora i suoi pacchetti sono accettati
+        self.assertIn("update_pos", _collect_methods(self.server, timeout=0.4))
+
+    def test_stranger_cannot_take_over_without_hello(self):
+        self.client.join_network("127.0.0.1", self.port)
+        time.sleep(1.0)
+        intruder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        intruder.sendto(json.dumps({"method": "update_pos", "args": [77, 9, 9, 9], "sender_id": 77}).encode(),
+                        ("127.0.0.1", self.port))
+        time.sleep(0.3)
+        intruder.close()
+        updates = [m for m in _collect_methods(self.server, timeout=0.3) if m == "update_pos"]
+        self.assertEqual(updates, [], "un pacchetto da un indirizzo sconosciuto, senza hello, e' rifiutato")
+
+
+class TestGamePortAllocation(unittest.TestCase):
+    """Il matchmaking riusa le porte delle partite finite e dice SERVER_FULL quando sono finite."""
+
+    def test_reuses_finished_blocks_and_reports_full(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
+        import matchmaking_server as mm
+        with patch.object(mm, "MAX_ACTIVE_GAMES", 3), patch.dict(mm.active_processes, {}, clear=True):
+            base = mm.GAME_INSTANCE_BASE_PORT
+            taken = []
+            for _ in range(3):
+                port = mm._allocate_game_port()
+                mm.active_processes[port] = object()
+                taken.append(port)
+            self.assertEqual(taken, [base, base + mm.PORT_BLOCK, base + 2 * mm.PORT_BLOCK])
+            self.assertIsNone(mm._allocate_game_port(), "tutti occupati")
+            del mm.active_processes[base + mm.PORT_BLOCK]              # una partita finisce
+            self.assertEqual(mm._allocate_game_port(), base + mm.PORT_BLOCK, "il blocco liberato si riusa")
+
+    def test_start_game_does_not_hold_the_lock_while_waiting(self):
+        """_start_game aspetta il supervisor: nel frattempo la coda deve restare libera per gli altri."""
+        import threading
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
+        import matchmaking_server as mm
+        free = []
+
+        def fake_wait(port, timeout=5.0):
+            def other_thread():
+                got = mm.port_lock.acquire(timeout=1.0)           # un altro thread riesce a prendere il lock?
+                free.append(got)
+                if got:
+                    mm.port_lock.release()
+            t = threading.Thread(target=other_thread)
+            t.start()
+            t.join()
+            return True
+
+        class FakeConn:
+            def sendall(self, data): pass
+            def close(self): pass
+
+        group = [(1, "127.0.0.1", 5001, FakeConn()), (2, "127.0.0.1", 5002, FakeConn())]
+        with patch.object(mm, "_wait_for_supervisor_ready", fake_wait), \
+                patch.object(mm.subprocess, "Popen", lambda *a, **k: object()), \
+                patch.dict(mm.active_processes, {}, clear=True), patch.dict(mm.active_games, {}, clear=True):
+            mm.active_processes[mm.GAME_INSTANCE_BASE_PORT] = None      # porta riservata, come fa handle_client
+            mm._start_game(group, mm.GAME_INSTANCE_BASE_PORT)
+            self.assertEqual(free, [True], "il lock era libero durante l'attesa")
+            self.assertIn(mm.GAME_INSTANCE_BASE_PORT, mm.active_games)
+
+
+class TestGameAuthorityApply(unittest.TestCase):
+    """Le regole condivise da server e host P2P: GameAuthority.apply."""
+
+    def setUp(self):
+        from game_authority import GameAuthority
+        self.auth = GameAuthority()
+
+    def test_block_step_returns_event_once(self):
+        changed, events = self.auth.apply(5, "block_step", [5, 11])
+        self.assertTrue(changed)
+        self.assertEqual(events, [("block_destroyed", (11, 5))])
+        changed, events = self.auth.apply(6, "block_step", [6, 11])
+        self.assertEqual((changed, events), (False, []), "gia' distrutto: niente di nuovo")
+
+    def test_death_and_win(self):
+        self.auth.apply(1, "update_pos", [1, 0, 0, 0])
+        self.auth.apply(2, "update_pos", [2, 0, 0, 0])
+        changed, events = self.auth.apply(1, "player_died", [99])        # l'id scritto non conta
+        self.assertEqual(events, [("player_removed", (1,)), ("game_won", (2,))])
+        self.assertEqual(self.auth.dead_players, {1})
+
+    def test_internal_left_uses_argument(self):
+        changed, events = self.auth.apply(0, "player_left", [7], internal=True)
+        self.assertIn(7, self.auth.left_players)
+
+    def test_unknown_or_malformed(self):
+        self.assertEqual(self.auth.apply(5, "boh", []), (False, []))
+        self.assertEqual(self.auth.apply(5, "update_pos", ["x"]), (False, []))
+
+
+class TestServerMessageHandler(unittest.TestCase):
+    """game_instance: conta chi ha davvero mandato il messaggio, non l'id scritto dentro."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
+        import game_instance
+        from game_authority import GameAuthority
+
+        class FakeRoom:
+            match_started = False
+
+        class FakeNM:
+            player_id = 0
+            room = FakeRoom()
+
+            def __init__(self):
+                self.sent = []
+
+            def broadcast_message(self, method, *args):
+                self.sent.append((method, args))
+
+        self.nm = FakeNM()
+        self.auth = GameAuthority()
+        self.changes = []
+        self.ready = {"ready_pids": set(), "countdown_started": False, "expected_count": 3}
+        self.handle = game_instance.make_message_handler(self.nm, self.auth, self.ready, lambda: self.changes.append(1))
+
+    def _msg(self, sender, method, *args):
+        self.handle({"method": method, "args": list(args), "sender_id": sender})
+
+    def test_client_cannot_kill_someone_else(self):
+        self._msg(5, "player_died", 7)                                  # il 5 dice che e' morto il 7
+        self.assertEqual(self.auth.dead_players, {5}, "muore chi ha mandato il messaggio")
+
+    def test_client_cannot_move_or_step_for_someone_else(self):
+        self._msg(5, "update_pos", 7, 1, 2, 3)
+        self.assertEqual(list(self.auth.player_positions), [5])
+        self._msg(5, "block_step", 7, 11)
+        self.assertEqual(self.auth.handle_block_step(5, 11), None, "il blocco 11 era gia' stato distrutto")
+        self.assertIn(("block_destroyed", (11, 5)), self.nm.sent, "e il merito e' del 5, non del 7")
+
+    def test_eliminated_player_is_ignored(self):
+        self._msg(5, "player_died", 5)
+        self._msg(5, "update_pos", 5, 1, 2, 3)
+        self._msg(5, "block_step", 5, 22)
+        self.assertNotIn(5, self.auth.player_positions)
+        self.assertNotIn(22, self.auth.destroyed_blocks)
+
+    def test_server_own_disconnect_message_is_trusted(self):
+        self._msg(0, "player_left", 7)                                  # lo genera il server alla disconnessione del 7
+        self.assertIn(7, self.auth.left_players)
+
+    def test_malformed_args_do_not_crash(self):
+        self._msg(5, "update_pos", "ciao")
+        self._msg(5, "block_step", "x", "y")
+        self._msg(5, "update_pos", 5, "a", "b", "c")
+        self.assertEqual(self.auth.player_positions, {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,6 @@ import socket
 import threading
 import time
 
-# --- Constants ---
 BROADCAST_PORT = 15000
 BROADCAST_INTERVAL = 1.0  # seconds
 DISCOVERY_TIMEOUT = 0.5   # socket timeout for listener
