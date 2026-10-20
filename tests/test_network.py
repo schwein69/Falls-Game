@@ -600,7 +600,7 @@ class TestNatAddressLearning(unittest.TestCase):
         self.real_addr = ("127.0.0.1", real)
         self.declared = real + 1000
         self.client.prepare_local_socket = lambda: self.declared      # dichiara una porta che non e' la sua
-        self.client.online.supervisor_sock = socket.socket()               # come un client Online (invia gli hello)
+        self.client.online.status = "matched"                              # come un client Online (invia gli hello)
         self.server = NetworkManager()
         self.server.room.expected = {("127.0.0.1", self.declared): 77}
         self.server.setup_host(port=self.port)
@@ -637,7 +637,7 @@ class TestNatAddressLearning(unittest.TestCase):
 class TestGamePortAllocation(unittest.TestCase):
     """Il matchmaking riusa le porte delle partite finite e dice SERVER_FULL quando sono finite."""
 
-    def test_reuses_finished_blocks_and_reports_full(self):
+    def test_reuses_finished_ports_and_reports_full(self):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
         import matchmaking_server as mm
         with patch.object(mm, "MAX_ACTIVE_GAMES", 3), patch.dict(mm.active_processes, {}, clear=True):
@@ -647,19 +647,19 @@ class TestGamePortAllocation(unittest.TestCase):
                 port = mm._allocate_game_port()
                 mm.active_processes[port] = object()
                 taken.append(port)
-            self.assertEqual(taken, [base, base + mm.PORT_BLOCK, base + 2 * mm.PORT_BLOCK])
+            self.assertEqual(taken, [base, base + 1, base + 2])
             self.assertIsNone(mm._allocate_game_port(), "tutti occupati")
-            del mm.active_processes[base + mm.PORT_BLOCK]              # una partita finisce
-            self.assertEqual(mm._allocate_game_port(), base + mm.PORT_BLOCK, "il blocco liberato si riusa")
+            del mm.active_processes[base + 1]                          # una partita finisce
+            self.assertEqual(mm._allocate_game_port(), base + 1, "la porta liberata si riusa")
 
     def test_start_game_does_not_hold_the_lock_while_waiting(self):
-        """_start_game aspetta il supervisor: nel frattempo la coda deve restare libera per gli altri."""
+        """_start_game aspetta il server di gioco: nel frattempo la coda deve restare libera per gli altri."""
         import threading
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
         import matchmaking_server as mm
         free = []
 
-        def fake_wait(port, timeout=5.0):
+        def fake_wait(port, process, timeout=10.0):
             def other_thread():
                 got = mm.port_lock.acquire(timeout=1.0)           # un altro thread riesce a prendere il lock?
                 free.append(got)
@@ -675,8 +675,10 @@ class TestGamePortAllocation(unittest.TestCase):
             def close(self): pass
 
         group = [(1, "127.0.0.1", 5001, FakeConn()), (2, "127.0.0.1", 5002, FakeConn())]
-        with patch.object(mm, "_wait_for_supervisor_ready", fake_wait), \
+        import tempfile
+        with patch.object(mm, "_wait_until_running", fake_wait), \
                 patch.object(mm.subprocess, "Popen", lambda *a, **k: object()), \
+                patch.object(mm, "RUN_DIR", tempfile.mkdtemp()), \
                 patch.dict(mm.active_processes, {}, clear=True), patch.dict(mm.active_games, {}, clear=True):
             mm.active_processes[mm.GAME_INSTANCE_BASE_PORT] = None      # porta riservata, come fa handle_client
             mm._start_game(group, mm.GAME_INSTANCE_BASE_PORT)
@@ -714,6 +716,33 @@ class TestGameAuthorityApply(unittest.TestCase):
         self.assertEqual(self.auth.apply(5, "update_pos", ["x"]), (False, []))
 
 
+class TestGamesSurviveMatchmakingRestart(unittest.TestCase):
+    """Le partite in corso si leggono dai file dei server di gioco: un matchmaking riavviato le ritrova."""
+
+    def test_adopts_live_games_and_ignores_dead_ones(self):
+        import tempfile
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server"))
+        import matchmaking_server as mm
+        run_dir = tempfile.mkdtemp()
+
+        def write(port, age):
+            with open(os.path.join(run_dir, f"game_{port}.json"), "w") as f:
+                json.dump({"port": port, "players": [port + 1, port + 2], "pid": 1, "start_ts": 0,
+                           "alive_at": time.time() - age}, f)
+        write(10000, 0.5)           # server di gioco vivo
+        write(10003, 60)            # non aggiorna il file da un minuto: morto
+        with patch.object(mm, "RUN_DIR", run_dir), \
+                patch.dict(mm.active_processes, {}, clear=True), patch.dict(mm.active_games, {}, clear=True):
+            mm.adopt_running_games()
+            self.assertEqual(list(mm.active_games), [10000])
+            self.assertEqual(mm.find_game_of(10001), f"GAME:{mm.MATCHMAKING_HOSTNAME}:10000")
+            self.assertEqual(mm.find_game_of(10004), "NOT_FOUND")
+            self.assertNotEqual(mm._allocate_game_port(), 10000, "la porta della partita ripresa resta occupata")
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "game_10003.json")), "il file del morto si cancella")
+            os.remove(os.path.join(run_dir, "game_10000.json"))        # il server chiude la partita
+            self.assertEqual(mm.active_processes[10000].poll(), 0, "ora risulta finita")
+
+
 class TestServerMessageHandler(unittest.TestCase):
     """game_instance: conta chi ha davvero mandato il messaggio, non l'id scritto dentro."""
 
@@ -737,9 +766,8 @@ class TestServerMessageHandler(unittest.TestCase):
 
         self.nm = FakeNM()
         self.auth = GameAuthority()
-        self.changes = []
         self.ready = {"ready_pids": set(), "countdown_started": False, "expected_count": 3}
-        self.handle = game_instance.make_message_handler(self.nm, self.auth, self.ready, lambda: self.changes.append(1))
+        self.handle = game_instance.make_message_handler(self.nm, self.auth, self.ready)
 
     def _msg(self, sender, method, *args):
         self.handle({"method": method, "args": list(args), "sender_id": sender})

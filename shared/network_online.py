@@ -2,7 +2,6 @@ import socket
 import json
 import random
 import threading
-import time
 import os
 
 from network import NetworkManager
@@ -28,6 +27,7 @@ def _matchmaking_handshake(nm):
             tcp.settimeout(15)
             tcp.connect((MATCHMAKING_HOSTNAME, MATCHMAKING_TCP_PORT))
             tcp.sendall(json.dumps({"id": my_label, "udp_port": local_udp_port}).encode())
+            tcp.settimeout(None)            
             nm.online.status = "queued"
 
             while True:                      
@@ -43,8 +43,8 @@ def _matchmaking_handshake(nm):
                     break
 
         _, host, port_str = msg.split(":")
-        print(f"[Network] Match trovato! Mi connetto al supervisor {host}:{port_str}")
-        _connect_via_supervisor(nm, host, int(port_str))
+        print(f"[Network] Match trovato! Mi unisco al server di gioco {host}:{port_str}")
+        nm.join_network(host, int(port_str))
         nm.online.status = "matched"
 
     except Exception as e:
@@ -72,58 +72,12 @@ def _rejoin_handshake(nm, player_id):
         if not answer.startswith("GAME:"):   
             raise ConnectionError("Il matchmaking non supporta il rientro: aggiorna matchmaking_server.py e riavvialo.")
         _, host, port_str = answer.split(":")
-        _connect_via_supervisor(nm, host, int(port_str), rejoin_id=player_id)
+        nm.join_network(host, int(port_str), rejoin_id=player_id)
         nm.online.status = "matched"
     except Exception as e:
         print(f"[Network] Rientro fallito: {e}")
         nm.online.status = "error"
         nm.online.error = str(e)
-
-
-def _read_line(sock, buf):
-    while b"\n" not in buf:
-        chunk = sock.recv(4096)
-        if not chunk:
-            raise ConnectionError("Il supervisor ha chiuso la connessione.")
-        buf += chunk
-    line, _, rest = bytes(buf).partition(b"\n")
-    buf[:] = rest
-    return json.loads(line)
-
-
-def _connect_via_supervisor(nm, supervisor_host, supervisor_port, connect_timeout=10, rejoin_id=None):
-    deadline = time.time() + connect_timeout
-    while True:                  
-        sock, buf = socket.socket(socket.AF_INET, socket.SOCK_STREAM), bytearray()
-        try:
-            sock.settimeout(2)
-            sock.connect((supervisor_host, supervisor_port))
-            info = _read_line(sock, buf)
-            break
-        except Exception as e:
-            sock.close()
-            if time.time() >= deadline:
-                raise ConnectionError(f"Impossibile connettersi al supervisor dopo {connect_timeout}s: {e}")
-            time.sleep(0.3)
-
-    nm.online.supervisor_sock = sock    # serve anche per chiuderlo in stop()
-    sock.settimeout(None)
-    print(f"[Network] Il supervisor indica il primary su {supervisor_host}:{info['primary_port']}. Mi unisco.")
-    nm.join_network(supervisor_host, info["primary_port"], rejoin_id=rejoin_id)   # l'host e' quello con cui ho raggiunto il supervisor
-
-    def _listen_for_failover():
-        while True:
-            try:
-                info = _read_line(sock, buf)
-            except Exception as e:
-                print(f"[Network] Connessione col supervisor interrotta: {e}")
-                return
-            if "new_primary_port" in info:
-                print(f"[Network] Il primary e' cambiato (failover): mi riaggancio con lo stesso ID ({nm.player_id}).")
-                nm.last_host_seen = time.time()
-                nm.join_network(supervisor_host, info["new_primary_port"], rejoin_id=nm.player_id)
-
-    threading.Thread(target=_listen_for_failover, daemon=True).start()
 
 
 # Lato server (usato da server/game_instance.py)

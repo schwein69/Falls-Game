@@ -10,27 +10,52 @@ import redis
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
 from config import *
 
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True) 
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)   
 _redis_warned = False
 
 STATUS_KEY = "matchmaking:status"  
 
 pending_clients = []  # list of (player_id, client_ip, udp_port, tcp_conn)
 active_games = {}     # port -> {players: [...], start_ts: ...}
-active_processes = {} # port -> subprocess.Popen del supervisor di quella partita — serve SOLO per
-                       # sapere quando la partita e' davvero finita, vedi cleanup_finished_games()
-PORT_BLOCK = 3                                           # porte per partita: supervisor, server di gioco, server di ripartenza
-MAX_ACTIVE_GAMES = globals().get("MAX_ACTIVE_GAMES", 50)  
-port_lock = threading.RLock()   #
-CLEANUP_INTERVAL = 2.0  # secondi tra un controllo delle partite concluse e il successivo
+active_processes = {} 
+MAX_ACTIVE_GAMES = globals().get("MAX_ACTIVE_GAMES", 10)  
+port_lock = threading.RLock()   
+CLEANUP_INTERVAL = 2.0  
+
+
+def _running_games():
+    games = {}
+    for key in r.scan_iter(GAME_KEY_PREFIX + "*"):
+        raw = r.get(key)
+        if raw is not None:                                        
+            info = json.loads(raw)
+            games[info["port"]] = info
+    return games
+
+
+class _AdoptedGame:
+    def __init__(self, port):
+        self.port = port
+
+    def poll(self):
+        try:
+            alive = r.exists(GAME_KEY_PREFIX + str(self.port))
+        except redis.RedisError:
+            alive = True                                          
+        return None if alive else 0                              
+
+
+def adopt_running_games():
+    with port_lock:
+        for port, info in _running_games().items():
+            if port not in active_processes:
+                active_processes[port] = _AdoptedGame(port)
+                active_games[port] = {"players": info["players"], "start_ts": info["start_ts"]}
+                print(f"{LOG_PREFIX} Partita gia' in corso sulla porta {port}: la riprendo ({info['players']}).")
 
 
 def write_status():
     global _redis_warned
-    if r is None:
-        return
     try:
         data = {
             "pending": [{"id": p[0], "ip": p[1], "udp_port": p[2]} for p in pending_clients],
@@ -39,29 +64,24 @@ def write_status():
         }
         r.set(STATUS_KEY, json.dumps(data))
     except Exception as e:
-        if not _redis_warned:                                # una volta sola: Redis e' facoltativo
+        if not _redis_warned:                                
             _redis_warned = True
-            print(f"{LOG_PREFIX} Redis non raggiungibile ({e}): niente stato per la dashboard.")
+            print(f"{LOG_PREFIX} Redis non raggiungibile ({e}): la dashboard non si aggiorna.")
 
 
-def _wait_for_supervisor_ready(tcp_port, timeout=5.0):
+def _wait_until_running(port, process, timeout=10.0):
     deadline = time.time() + timeout
-    while time.time() < deadline:
+    while time.time() < deadline and process.poll() is None:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5)
-                s.connect(("127.0.0.1", tcp_port))
-            return True
-        except Exception:
-            time.sleep(0.1)
-    print(f"{LOG_PREFIX} Attenzione: il supervisor sulla porta {tcp_port} non risulta pronto dopo "
-          f"{timeout}s, procedo comunque.")
-    return False
+            if r.exists(GAME_KEY_PREFIX + str(port)):
+                return True
+        except redis.RedisError:
+            pass
+        time.sleep(0.1)
+    return process.poll() is None
 
 
 def _remove_from_queue(entry, reason):
-    """Toglie un giocatore dalla coda in modo sicuro (idempotente: se e' gia' stato tolto,
-    es. perche' nel frattempo e' scattato un match, non fa nulla di male a riprovare)."""
     with port_lock:
         if entry in pending_clients:
             pending_clients.remove(entry)
@@ -70,12 +90,10 @@ def _remove_from_queue(entry, reason):
 
 
 def find_game_of(player_id):
-    """Il rientro: in quale partita in corso sta questo giocatore? Risponde come il matchmaking
-    normale ("GAME:host:porta-del-supervisor"), oppure "NOT_FOUND" se la partita e' finita."""
     with port_lock:
-        for supervisor_port, game in active_games.items():
+        for game_port, game in active_games.items():
             if player_id in game["players"]:
-                return f"GAME:{MATCHMAKING_HOSTNAME}:{supervisor_port}"
+                return f"GAME:{MATCHMAKING_HOSTNAME}:{game_port}"
     return "NOT_FOUND"
 
 
@@ -87,7 +105,6 @@ def _close(conn):
 
 
 def _send(conn, data):
-    """Manda dei byte; False se il client e' gia' sparito."""
     try:
         conn.sendall(data)
         return True
@@ -96,41 +113,47 @@ def _send(conn, data):
 
 
 def _allocate_game_port():
-    """Il primo blocco di porte libero (si riusano quelli delle partite finite), o None se sono tutti occupati."""
     for i in range(MAX_ACTIVE_GAMES):
-        base = GAME_INSTANCE_BASE_PORT + i * PORT_BLOCK
+        base = GAME_INSTANCE_BASE_PORT + i
         if base not in active_processes:
             return base
     return None
 
 
-def _start_game(group, supervisor_tcp_port):
-    """Gruppo completo e porta gia' riservata (sotto lock): avvia il supervisor della partita SENZA lock,
-    cosi' l'attesa non blocca code e cancellazioni, e poi manda a ognuno GAME:host:porta."""
-    udp_base_port = supervisor_tcp_port + 1
+def _start_game(group, game_port):
     players_info = [(pid, ip, udp) for (pid, ip, udp, _) in group]
-    print(f"{LOG_PREFIX} Avvio il supervisor (porta TCP {supervisor_tcp_port}, server di gioco "
-          f"sulla {udp_base_port}) per i giocatori: {[p[0] for p in players_info]}")
-    supervisor_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "supervisor.py")
+    print(f"{LOG_PREFIX} Avvio il server di gioco sulla porta {game_port} per i giocatori: {[p[0] for p in players_info]}")
+    game_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_instance.py")
+    detach = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+              if os.name == "nt" else {"start_new_session": True})
+    process = None
     try:
-        process = subprocess.Popen(
-            [sys.executable, supervisor_path, str(supervisor_tcp_port), json.dumps(players_info), str(udp_base_port)])
+        os.makedirs(RUN_DIR, exist_ok=True)
+        log_path = os.path.join(RUN_DIR, f"game_{game_port}.log")
+        with open(log_path, "ab") as log:
+            process = subprocess.Popen(
+                [sys.executable, game_path, "--udp-port", str(game_port), "--players", json.dumps(players_info)],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                env=dict(os.environ, PYTHONUNBUFFERED="1"), **detach)
+        print(f"{LOG_PREFIX} Log della partita: {os.path.abspath(log_path)}")
+        started = _wait_until_running(game_port, process)
     except Exception as e:
-        print(f"{LOG_PREFIX} Supervisor non partito: {e}")
+        print(f"{LOG_PREFIX} Server di gioco non partito: {e}")
+        started = False
+    if not started:
         with port_lock:
-            active_processes.pop(supervisor_tcp_port, None)       # libero la porta riservata
+            active_processes.pop(game_port, None)                
         for _, _, _, c in group:
             _send(c, b"SERVER_FULL")
             _close(c)
         return
-    _wait_for_supervisor_ready(supervisor_tcp_port)
-    with port_lock:                                               # il lock serve solo per aggiornare le liste
-        active_processes[supervisor_tcp_port] = process
-        active_games[supervisor_tcp_port] = {"players": [p[0] for p in players_info], "start_ts": time.time()}
+    with port_lock:                                              
+        active_processes[game_port] = process
+        active_games[game_port] = {"players": [p[0] for p in players_info], "start_ts": time.time()}
         write_status()
     for pid, _, _, c in group:
         try:
-            c.sendall(f"GAME:{MATCHMAKING_HOSTNAME}:{supervisor_tcp_port}".encode())
+            c.sendall(f"GAME:{MATCHMAKING_HOSTNAME}:{game_port}".encode())
             c.close()
         except Exception as e:
             print(f"{LOG_PREFIX} Failed to notify client {pid}: {e}")
@@ -163,21 +186,21 @@ def handle_client(conn, addr):
 
         with port_lock:
             if any(p[0] == player_id for p in pending_clients):
-                print(f"{LOG_PREFIX} Player {player_id} rifiutato: id gia' in coda (collisione).")
+                print(f"{LOG_PREFIX} Player {player_id} rifiutato: id gia' in coda.")
                 _send(conn, b"ID_COLLISION")
                 _close(conn)
                 return
             pending_clients.append(entry)
             write_status()
             group = None
-            if len(pending_clients) >= MAX_PLAYERS:               # gruppo completo: parte la partita
+            if len(pending_clients) >= MAX_PLAYERS:               
                 group = pending_clients[:MAX_PLAYERS]
                 del pending_clients[:MAX_PLAYERS]
                 game_port = _allocate_game_port()
                 if game_port is not None:
-                    active_processes[game_port] = None            # riservata: nessun altro gruppo la prende
+                    active_processes[game_port] = None            
                 write_status()
-            elif not _send(conn, b"WAIT"):                        # sotto lock: WAIT parte sempre prima di un eventuale GAME
+            elif not _send(conn, b"WAIT"):                        
                 _remove_from_queue(entry, "connessione persa mentre mandavo WAIT")
                 return
 
@@ -210,14 +233,20 @@ def cleanup_finished_games():
             if not finished_ports:
                 continue
             for port in finished_ports:
-                print(f"{LOG_PREFIX} Partita sulla porta {port} conclusa (il supervisor si e' "
-                      f"chiuso). Rimossa dalla lista.")
+                print(f"{LOG_PREFIX} Partita sulla porta {port} conclusa.")
                 active_games.pop(port, None)
                 active_processes.pop(port, None)
             write_status()
 
 
 def start_matchmaking():
+    try:
+        r.ping()
+    except redis.RedisError as e:
+        sys.exit(f"{LOG_PREFIX} Redis non raggiungibile su {REDIS_HOST}:{REDIS_PORT} ({e}). "
+                 f"Avvialo prima del matchmaking: serve per ritrovare le partite in corso.")
+    os.makedirs(RUN_DIR, exist_ok=True)                          
+    adopt_running_games()
     write_status()
     threading.Thread(target=cleanup_finished_games, daemon=True).start()
 

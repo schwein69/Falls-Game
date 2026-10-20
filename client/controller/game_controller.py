@@ -247,12 +247,12 @@ class GameController(MessageHandlers):
     # ---------------- lobby ----------------
     def begin_game(self):
         m = self.model
-        m.network_manager.room.closed = True                 
+        m.network_manager.room.closed = True                
         if m.broadcaster:
-            m.broadcaster.stop()                             
+            m.broadcaster.stop()                            
             m.broadcaster = None
         m.network_manager.send_message("start_game", m.game_authority.floor_seed)
-        self.on_start_game(m.game_authority.floor_seed)   
+        self.on_start_game(m.game_authority.floor_seed)     
 
     def leave_lobby(self):
         m = self.model
@@ -265,7 +265,6 @@ class GameController(MessageHandlers):
         self.view.clear_all_ui_elements()
         self.view.show_main_menu_screen()
 
-    # ---------------- migrazione dell'host (solo P2P) ----------------
     def check_host_migration(self):
         m = self.model
         nm = m.network_manager
@@ -425,7 +424,7 @@ class GameController(MessageHandlers):
         if now - self._last_saved < 1.0:
             return
         self._last_saved = now
-        rejoin_store.save(nm.player_id, f"Player {nm.player_id}", "online" if nm.online.supervisor_sock is not None else "p2p")
+        rejoin_store.save(nm.player_id, f"Player {nm.player_id}", "online" if nm.online.status != "idle" else "p2p")
 
     def show_rejoin_offer_or_menu(self):
         """All'avvio, al posto del menu: se c'e' una partita interrotta da poco propone di rientrare."""
@@ -523,8 +522,8 @@ class GameController(MessageHandlers):
         self._end_rejoin()
         if last is not None:
             m.player.position = self._safe_position(Vec3(*last))
-            for cube in m.floors.floor_cubes:               
-                if not cube.is_empty():                       
+            for cube in m.floors.floor_cubes:                 # collider dei blocchi vicini subito, non alla prima update:
+                if not cube.is_empty():                       # altrimenti alla ripresa si cade attraverso il pavimento
                     cube.updateColliders(m.player)
         if hasattr(m.player, "air_time"):
             m.player.air_time = 0                             # la velocita' di caduta riparte da zero

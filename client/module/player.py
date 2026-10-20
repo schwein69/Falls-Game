@@ -95,7 +95,10 @@ class Player(FirstPersonController, AnimatedCharacterMixin):
             self.animate_position(self.position + direction * 5, duration=0.3, curve=curve.linear)
             self.can_dash = False
 
+        dt = time.dt
+        time.dt = min(dt, 1 / 30)                             
         super().update()
+        time.dt = dt
 
     def switch_animation(self, new_animation):
         AnimatedCharacterMixin.switch_animation(self, new_animation)
