@@ -95,31 +95,6 @@ class GameAuthority:
             if game_over:
                 events.append(("game_won", (winner,)))
             return True, events
-        except (ValueError, TypeError):       # argomenti sbagliati: li ignoro
+        except (ValueError, TypeError):       
             return False, []
-
-    def to_dict(self):
-        """Serializza lo stato dell'autorita' in un dizionario, da trasmettere a un backup."""
-        return {
-            "floor_seed": self.floor_seed,
-            "destroyed_blocks": list(self.destroyed_blocks),
-            "player_positions": {str(pid): list(pos) for pid, pos in self.player_positions.items()},
-            "known_players": list(self.known_players),
-            "dead_players": list(self.dead_players),
-            "left_players": list(self.left_players),
-            "game_won": self.game_won,
-        }
-
-    @classmethod
-    def from_dict(cls, data):
-        """Ricostruisce un'autorita' da uno stato replicato. Usato dal backup
-        quando viene promosso a primary."""
-        auth = cls()
-        auth.floor_seed = data["floor_seed"]
-        auth.destroyed_blocks = set(data["destroyed_blocks"])
-        auth.player_positions = {int(pid): tuple(pos) for pid, pos in data["player_positions"].items()}
-        auth.known_players = set(data["known_players"])
-        auth.dead_players = set(data["dead_players"])
-        auth.left_players = set(data["left_players"])
-        auth.game_won = data["game_won"]
-        return auth
+    

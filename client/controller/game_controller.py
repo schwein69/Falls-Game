@@ -13,7 +13,7 @@ import network_online
 import rejoin_store
 from .message_handler import MessageHandlers     
 def _guarded(fn):
-    """Stampa per intero le eccezioni di update: Ursina le assorbe e il gioco si bloccherebbe muto."""
+    """Stampa per intero le eccezioni di update."""
     def wrapper(self):
         try:
             fn(self)
@@ -30,9 +30,9 @@ class GameController(MessageHandlers):
         self.view = view
         self._last_saved = 0.0       # ultimo salvataggio del file di rientro
         self._rejoin = None          # il rientro in corso
-        self._rejoin_prompt = []     # gli elementi della proposta "Rientra?"
-        self._rejoin_wait_until = None   # ripiego: dopo il rientro, se la ripresa non arriva si riparte da soli
-        self._countdown_end = None   # istante in cui finisce il 3-2-1
+        self._rejoin_prompt = []     
+        self._rejoin_wait_until = None   
+        self._countdown_end = None   
         self._countdown_shown = None
 
     # ---------------- utilita' ----------------
@@ -66,7 +66,7 @@ class GameController(MessageHandlers):
             if pid not in m.other_players and pid != nm.player_id:
                 self.on_spawn_player(pid, 0, SPAWN_HEIGHT, 0)
 
-        if nm.is_host:                        # partenza sincronizzata: aspetta tutti i "pronto"
+        if nm.is_host:                        
             m.ready_pids = set()
             m.expected_ready_count = len(nm.room.clients) + 1     # clients registrati (non connected_ids) + l'host
             m.countdown_started = False
@@ -95,7 +95,7 @@ class GameController(MessageHandlers):
         self.on_start_countdown()
 
     def _countdown_safety_net(self):
-        """Dopo 10 s si parte comunque con chi c'e' (qualcuno potrebbe non confermare mai)."""
+        """Dopo 10 s si parte comunque con chi c'e'."""
         m = self.model
         if not (m.network_manager and m.network_manager.is_host) or getattr(m, 'countdown_started', False):
             return
@@ -103,7 +103,6 @@ class GameController(MessageHandlers):
         self._begin_countdown()
 
     def _update_countdown(self):
-        """Ogni frame: mostra il numero in base all'orologio, e allo scadere accende la gravita'."""
         if self._countdown_end is None:
             return
         remaining = math.ceil(self._countdown_end - time.time())
@@ -131,7 +130,7 @@ class GameController(MessageHandlers):
         m = self.model
         m.lobby_open = False
         self.view.clear_all_ui_elements()
-        application.resume()                  # in pausa l'invoke del menu non partirebbe
+        application.resume()                 
         self._destroy_world()
         self._leave_network()
         m.game_authority = None
@@ -196,7 +195,7 @@ class GameController(MessageHandlers):
     def poll_p2p_join_outcome(self, nm, started_at, timeout=15):
         m = self.model
         if m.network_manager is not nm:
-            return                            # nel frattempo siamo tornati al menu
+            return                            
         if nm.player_id is not None:
             self._destroy_tagged('p2p_connecting_text')
             self.view.show_lobby_screen()
@@ -219,7 +218,7 @@ class GameController(MessageHandlers):
     def poll_matchmaking_status(self, nm, status_text):
         m = self.model
         if m.network_manager is not nm:
-            return                            # nel frattempo siamo tornati al menu
+            return                            
         status = nm.online.status
         if status == "matched":
             if not m.is_in_active_match():
