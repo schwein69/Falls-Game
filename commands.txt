@@ -5,4 +5,6 @@
 'poetry run python -m unittest tests.test_rejoin_store -v',
 'poetry run python -m unittest tests.test_rejoin -v',
 'poetry run python -m unittest tests.test_game_model -v',
+'poetry run python -m unittest tests.test_host_migration -v',
+'poetry run python -m unittest tests.test_matchmaking -v',
 'poetry run streamlit run server/streamlit_dashboard.py' per la dashboard.
