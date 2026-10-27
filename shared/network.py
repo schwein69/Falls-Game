@@ -82,7 +82,7 @@ class NetworkManager:
         self._tick_thread = None            # thread that sends the positions at fixed intervals
         self._heartbeat_thread = None       # thread that sends the host heartbeat
 
-    # ---------------- connecting ----------------
+    # Connecting
     def prepare_local_socket(self):
         """Create the local UDP socket (if missing) and return its port."""
         if self.sock is None:
@@ -126,7 +126,7 @@ class NetworkManager:
                     return
                 self.player_id = resp["id"]
                 print(f"[Network] Connesso con successo. Il mio ID: {self.player_id}")
-                if self.online.status != "idle":                   # Online only: in P2P there is no NAT to go through
+                if self.online.status != "idle":                   # Online only
                     threading.Thread(target=self._send_hellos, daemon=True).start()
                 return
             except Exception as e:
@@ -167,7 +167,7 @@ class NetworkManager:
         threading.Thread(target=self._accept_join_loop, daemon=True).start()
         print(f"[Network] Host/server avviato sulla porta {bind_port} (player_id={player_id})")
 
-    # ---------------- joining (host only) ----------------
+    #  joining (host only) 
     def _accept_join_loop(self):
         """Accept incoming TCP connections, each one in its own thread."""
         while self.running:
@@ -263,7 +263,7 @@ class NetworkManager:
         if room.on_join:
             room.on_join(new_id, client_addr)
 
-    # ---------------- sending ----------------
+    #  sending 
     def send_message(self, method_name, *args):
         """Client: to the host/server. Host: to all the clients. Sender: our id."""
         if self.player_id is None and not self.is_host:
