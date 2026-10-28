@@ -14,7 +14,6 @@ It is the final project of a Distributed Systems course: the interesting part is
 - **Authoritative server:** clients only *ask* ("I step on this block"), a single authority (the host or the game process) decides and tells everybody.
 - **Fault tolerance:** heartbeat, pause when a player goes silent, 10 s grace period, rejoin with the same identity, host migration in P2P mode.
 - **Consistency over availability (CAP):** on a partition the match pauses instead of diverging.
-- **Tested without graphics:** 106 automatic tests, no window and no Redis needed.
 
 ## Controls
 
