@@ -92,7 +92,7 @@ The address of the matchmaking server is set in `shared/config.py`.
 
 - **Authority:** `GameAuthority` holds the rules and the state of the match. In P2P it runs on the host; in matchmaking it runs in `server/game_instance.py`. The code is the same, only the way it is started changes.
 - **Transport:** the join handshake is TCP (once); all the game traffic is UDP. A lost position packet is replaced by the next one.
-- **Snapshots:** the authority sends the positions of all players every 25 ms (matchmaking) or 50 ms (P2P).
+- **Snapshots:** the authority sends the positions of all players every 25 ms.
 - **Redis:** used only as a registry of running matches (key `game:<port>`, TTL 3 s, renewed every second). If a game process dies, its key expires by itself, and a restarted matchmaking server adopts the matches that are still running.
 - **Failures:** the host sends a heartbeat every second. After 5 s of silence the match is paused for everybody; the player has 10 s to come back with the same id, otherwise he is removed. If the P2P host disappears, the player with the lowest id becomes the new host.
 
