@@ -34,6 +34,24 @@ It is the final project of a Distributed Systems course: the interesting part is
 poetry install
 ```
 
+### Installing Redis
+
+Redis runs on the machine that hosts the matchmaking server. Clients and P2P players do not need it.
+
+Install [Docker](https://docs.docker.com/get-docker/), then start Redis in a container:
+
+```bash
+docker run -d --name redis -p 6379:6379 redis
+```
+
+Check that it answers:
+
+```bash
+docker exec redis redis-cli ping
+```
+
+You should see `PONG`. By default Redis listens on `localhost:6379`.
+
 ## How to play
 
 ### Local (P2P)
@@ -48,13 +66,19 @@ Choose **Local → Host** on one PC and **Local → Join** on the others (same n
 
 ### Matchmaking
 
-On the machine that will act as server (Redis must be running):
+On the machine that will act as server, start Redis first (see above), then the matchmaking server:
 
 ```bash
 poetry run python server/matchmaking_server.py
 ```
 
-Then start the game on each client and choose **Matchmaking**. When three players are in the queue, the server starts a `game_instance` process and tells everybody where to connect.
+Then start the game on each client and choose **Matchmaking**:
+
+```bash
+poetry run python main.py
+```
+
+When three players are in the queue, the server starts a `game_instance` process and tells everybody where to connect.
 
 The address of the matchmaking server is set in `shared/config.py`.
 
