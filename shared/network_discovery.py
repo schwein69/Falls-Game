@@ -50,7 +50,7 @@ class DiscoveryBroadcaster:
         except:
             pass
 
-# --- Listener Class with Timeout Cleanup ---
+# Listener Class with Timeout Cleanup 
 class DiscoveryListener:
     HOST_TIMEOUT = 2.0  # seconds after which a host is considered gone
 

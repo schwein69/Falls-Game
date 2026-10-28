@@ -491,7 +491,7 @@ class NetworkManager:
         self.send_raw(json.dumps(leave_payload))
 
     def process_queue(self, message_handler_func):
-        """Give every received message to the game's handler (called from the main thread)."""
+        """Give every received message to the game's handler."""
         while not self.msg_queue.empty():
             message_handler_func(self.msg_queue.get_nowait())
 

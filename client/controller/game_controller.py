@@ -15,6 +15,7 @@ from .message_handler import MessageHandlers
 
 
 class GameController(MessageHandlers):
+
     def __init__(self, model, view):
         self.model = model
         self.view = view
@@ -24,6 +25,8 @@ class GameController(MessageHandlers):
         self._rejoin_wait_until = None   # after rejoining: time limit to wait for the resume message
         self._countdown_end = None       # when the 3-2-1 ends (None = no countdown)
         self._countdown_shown = None     # the number currently on screen
+
+    #  Small helpers: on-screen text and network shutdown 
 
     def _say(self, text, y, tag=None, scale=1.2):
         """Centered text on screen. With a tag it can be removed later with _destroy_tagged."""
@@ -36,7 +39,7 @@ class GameController(MessageHandlers):
                 destroy(t)
 
     def _drop_network(self, deliberate=False):
-        """Stop the network manager (if any) and forget it. deliberate=True: we sent LEAVE."""
+        """Stop the network manager. deliberate=True: we sent LEAVE."""
         nm = self.model.network_manager
         if nm:
             if deliberate:
@@ -60,7 +63,124 @@ class GameController(MessageHandlers):
             rejoin_store.clear(nm.player_id)
             self._drop_network(deliberate=True)
 
-    # Match start
+    #  P2P sessions (menu -> host or join) 
+
+    def start_local_host_session(self):
+        m = self.model
+        self.view.clear_all_ui_elements()
+        m.network_manager, m.game_authority, m.broadcaster = network_p2p.start_p2p_host()
+        if m.game_authority is None:          # the P2P port is taken: a host already exists on this PC
+            self._drop_network()
+            self.view.display_error_message_screen(
+                "Esiste gia' una sessione host attiva su questo PC. "
+                "Usa 'Join Game' per unirti a quella, oppure chiudila prima di crearne una nuova.",
+                self.view.show_local_mode_menu)
+            return
+        invoke(self.view.show_lobby_screen, delay=0.5)
+
+    def start_local_client_session(self):
+        self.view.clear_all_ui_elements()
+        Text("Searching for LAN hosts...", scale=1.2, y=0.2, origin=(0, 0), parent=camera.ui)
+        invoke(self.scan_lan_for_hosts, delay=0.5)
+
+    def scan_lan_for_hosts(self):
+        listener = network_p2p.start_host_discovery_scan()
+        self.model.current_listener = listener
+        self.view.show_lan_host_scan_screen(listener)
+
+    def back_to_scan_host_menu(self, listener):
+        listener.stop()
+        self.view.show_local_mode_menu()
+
+    def connect_to_p2p_host(self, ip_or_getter, port_or_getter, listener):
+        """ip and port can be values or functions that return them."""
+        m = self.model
+        ip = ip_or_getter() if callable(ip_or_getter) else ip_or_getter
+        port = port_or_getter() if callable(port_or_getter) else port_or_getter
+        if not ip:
+            return
+        listener.stop()
+        self.view.clear_all_ui_elements()
+        self._say("Connessione in corso...", 0.1, 'p2p_connecting_text')
+        try:
+            m.network_manager = network_p2p.join_p2p_host(ip, port)
+        except Exception:
+            self.view.display_error_message_screen("Connection failed.", self.view.show_local_mode_menu)
+            return
+        invoke(self.poll_p2p_join_outcome, m.network_manager, time.time(), delay=0.2)
+
+    def _fail_p2p_join(self, message):
+        self._destroy_tagged('p2p_connecting_text')
+        self._drop_network()
+        self.view.display_error_message_screen(message, self.view.show_local_mode_menu)
+
+    def poll_p2p_join_outcome(self, nm, started_at, timeout=15):
+        if self.model.network_manager is not nm:
+            return                         
+        if nm.player_id is not None:
+            self._destroy_tagged('p2p_connecting_text')
+            self.view.show_lobby_screen()
+        elif nm.join_rejected is not None:
+            self._fail_p2p_join(nm.join_rejected)
+        elif time.time() - started_at > timeout:
+            self._fail_p2p_join("Impossibile connettersi all'host: nessuna risposta.")
+        else:
+            invoke(self.poll_p2p_join_outcome, nm, started_at, timeout, delay=0.2)
+
+    # Online sessions (matchmaking) 
+
+    def start_online_client_session(self):
+        m = self.model
+        self.view.clear_all_ui_elements()
+        status_text, back_btn = self.view.show_online_connecting_screen(self.cancel_online_session)
+        m.gui_elements.extend([status_text, back_btn])
+        m.network_manager = network_online.start_online_session()
+        invoke(self.poll_matchmaking_status, m.network_manager, status_text, delay=0.5)
+
+    def poll_matchmaking_status(self, nm, status_text):
+        m = self.model
+        if m.network_manager is not nm:
+            return                            
+        status = nm.online.status
+        if status == "matched":
+            if not m.is_in_active_match():
+                invoke(self._show_lobby_if_waiting, delay=0.2)
+        elif status == "error":
+            self.view.display_error_message_screen(
+                f"Connessione al matchmaking fallita: {nm.online.error}", self.view.show_main_menu_screen)
+        else:
+            self.view.update_matchmaking_status_text(status_text, status)
+            invoke(self.poll_matchmaking_status, nm, status_text, delay=0.5)
+
+    def _show_lobby_if_waiting(self):
+        """Show the lobby."""
+        if self.model.network_manager is not None and not self.model.is_in_active_match():
+            self.view.show_lobby_screen()
+
+    def cancel_online_session(self):
+        self._drop_network()
+        self.view.show_main_menu_screen()
+
+    # Lobby 
+
+    def begin_game(self):
+        m = self.model
+        m.network_manager.room.closed = True  # no new players from now on, only rejoins
+        self._stop_threads("broadcaster")     # stop announcing the game on the LAN
+        m.network_manager.send_message("start_game", m.game_authority.floor_seed)
+        self.on_start_game(m.game_authority.floor_seed)    
+
+    def leave_lobby(self):
+        m = self.model
+        m.lobby_open = False
+        self._leave_network()
+        self._stop_threads("broadcaster")
+        m.connected_ids.clear()
+        self.view.clear_all_ui_elements()
+        self.view.show_main_menu_screen()
+
+    # Match start: load level, ready, countdown
+
     def load_level(self, floor_seed=None):
         m = self.model
         self.view.clear_all_ui_elements()
@@ -132,6 +252,37 @@ class GameController(MessageHandlers):
         if m.network_manager:
             m.network_manager.room.match_started = True
 
+    # ---- The game world ----
+
+    def _build_world(self, floor_seed, player_id):
+        """Floors, sky and our player, held still up high."""
+        m = self.model
+        m.player_died_reported = False
+        apply_floor_seed(floor_seed)
+        m.floors = Floor()
+        m.sky = Entity(model="sphere", texture=os.path.join("assets", "sky.png"), scale=9999, double_sided=True)
+        top_floor_y = (FLOOR_COUNT - 1) * FLOOR_HEIGHT
+        for cube in m.floors.floor_cubes:     # only the top floor has colliders at the beginning for minimalize resources
+            if abs(cube.y - top_floor_y) < 0.01:
+                cube.collider = "box"
+                cube.collider_added = True
+        m.player = Player(get_random_position() + Vec3(0, 10, 0), f"Player {player_id}")
+        m.player.gravity = 0
+        camera.z = -5
+        m.game_over = False
+
+    def _destroy_world(self):
+        m = self.model
+        for entity in (m.player, m.floors, m.sky, *m.other_players.values()):
+            if entity is not None:
+                destroy(entity)
+        m.other_players.clear()
+        m.connected_ids.clear()
+        m.player = m.floors = m.sky = None
+        m.level_loaded = False
+        m.game_over = False
+        self._countdown_end = None
+
     def reset_floor(self):
         """Back to the main menu: remove the world, leave the network, stop the helper threads."""
         m = self.model
@@ -144,120 +295,53 @@ class GameController(MessageHandlers):
         self._stop_threads("broadcaster", "current_listener")
         invoke(self.view.show_main_menu_screen, delay=1)
 
-    # P2P sessions 
-    def start_local_host_session(self):
+    # Game loop 
+
+    def update_network(self):
+        nm = self.model.network_manager
+        if nm:
+            nm.process_queue(self.handle_message)
+            self.check_host_migration()
+            self._remember()
+        if self._rejoin_wait_until and time.time() > self._rejoin_wait_until: 
+            self._rejoin_wait_until = None
+            self._destroy_tagged('pause_text')
+            application.resume()
+        self._update_countdown()
+
+    def update_gameplay(self):
         m = self.model
-        self.view.clear_all_ui_elements()
-        m.network_manager, m.game_authority, m.broadcaster = network_p2p.start_p2p_host()
-        if m.game_authority is None:          # the P2P port is taken: a host already exists on this PC
-            self._drop_network()
-            self.view.display_error_message_screen(
-                "Esiste gia' una sessione host attiva su questo PC. "
-                "Usa 'Join Game' per unirti a quella, oppure chiudila prima di crearne una nuova.",
-                self.view.show_local_mode_menu)
+        nm = m.network_manager
+        if not m.level_loaded or m.player is None or m.game_over:
             return
-        invoke(self.view.show_lobby_screen, delay=0.5)
+        player = m.player
+        for entity in scene.entities:         # ask the host to activate the block we stand on
+            if isinstance(entity, FloorCube):
+                entity.updateColliders(player)
+                if (entity.collider_added and not entity.has_activated and not entity.step_requested
+                        and not entity.is_disappearing and entity.is_player_standing_on(player)):
+                    entity.step_requested = True
+                    self.request_block_step(entity.block_id)
 
-    def start_local_client_session(self):
-        self.view.clear_all_ui_elements()
-        Text("Searching for LAN hosts...", scale=1.2, y=0.2, origin=(0, 0), parent=camera.ui)
-        invoke(self.scan_lan_for_hosts, delay=0.5)
+        if not m.player_died_reported and player.world_position.y < -20:   # we fell off the floors
+            m.player_died_reported = True
+            player.gameOver()
+            self.request_player_died()
+            rejoin_store.clear(nm.player_id)                  # eliminated: no rejoin
 
-    def scan_lan_for_hosts(self):
-        listener = network_p2p.start_host_discovery_scan()
-        self.model.current_listener = listener
-        self.view.show_lan_host_scan_screen(listener)
-
-    def back_to_scan_host_menu(self, listener):
-        listener.stop()
-        self.view.show_local_mode_menu()
-
-    def connect_to_p2p_host(self, ip_or_getter, port_or_getter, listener):
-        """ip and port can be values or functions that return them."""
-        m = self.model
-        ip = ip_or_getter() if callable(ip_or_getter) else ip_or_getter
-        port = port_or_getter() if callable(port_or_getter) else port_or_getter
-        if not ip:
+        if m.game_over or m.player is None or not nm or nm.player_id is None:
             return
-        listener.stop()
-        self.view.clear_all_ui_elements()
-        self._say("Connessione in corso...", 0.1, 'p2p_connecting_text')
-        try:
-            m.network_manager = network_p2p.join_p2p_host(ip, port)
-        except Exception:
-            self.view.display_error_message_screen("Connection failed.", self.view.show_local_mode_menu)
-            return
-        invoke(self.poll_p2p_join_outcome, m.network_manager, time.time(), delay=0.2)
+        nm.send_message("update_pos", nm.player_id, player.x, player.y, player.z)    # tell the others
+        if nm.is_host and m.game_authority is not None:       
+            m.game_authority.handle_update_pos(nm.player_id, player.x, player.y, player.z)
+            self.on_state_snapshot(m.game_authority.snapshot_payload())
 
-    def _fail_p2p_join(self, message):
-        self._destroy_tagged('p2p_connecting_text')
-        self._drop_network()
-        self.view.display_error_message_screen(message, self.view.show_local_mode_menu)
+    def input(self, key):
+        if key == 'escape' and self.model.level_loaded:
+            self.reset_floor()
 
-    def poll_p2p_join_outcome(self, nm, started_at, timeout=15):
-        if self.model.network_manager is not nm:
-            return                         
-        if nm.player_id is not None:
-            self._destroy_tagged('p2p_connecting_text')
-            self.view.show_lobby_screen()
-        elif nm.join_rejected is not None:
-            self._fail_p2p_join(nm.join_rejected)
-        elif time.time() - started_at > timeout:
-            self._fail_p2p_join("Impossibile connettersi all'host: nessuna risposta.")
-        else:
-            invoke(self.poll_p2p_join_outcome, nm, started_at, timeout, delay=0.2)
+    # Host migration (P2P) 
 
-    # Online sessions 
-    def start_online_client_session(self):
-        m = self.model
-        self.view.clear_all_ui_elements()
-        status_text, back_btn = self.view.show_online_connecting_screen(self.cancel_online_session)
-        m.gui_elements.extend([status_text, back_btn])
-        m.network_manager = network_online.start_online_session()
-        invoke(self.poll_matchmaking_status, m.network_manager, status_text, delay=0.5)
-
-    def poll_matchmaking_status(self, nm, status_text):
-        m = self.model
-        if m.network_manager is not nm:
-            return                            
-        status = nm.online.status
-        if status == "matched":
-            if not m.is_in_active_match():
-                invoke(self._show_lobby_if_waiting, delay=0.2)
-        elif status == "error":
-            self.view.display_error_message_screen(
-                f"Connessione al matchmaking fallita: {nm.online.error}", self.view.show_main_menu_screen)
-        else:
-            self.view.update_matchmaking_status_text(status_text, status)
-            invoke(self.poll_matchmaking_status, nm, status_text, delay=0.5)
-
-    def _show_lobby_if_waiting(self):
-        """Show the lobby, but never over a match already started (the View clears the whole UI)."""
-        if self.model.network_manager is not None and not self.model.is_in_active_match():
-            self.view.show_lobby_screen()
-
-    def cancel_online_session(self):
-        self._drop_network()
-        self.view.show_main_menu_screen()
-
-    # lobby 
-    def begin_game(self):
-        m = self.model
-        m.network_manager.room.closed = True  # no new players from now on, only rejoins
-        self._stop_threads("broadcaster")     # stop announcing the game on the LAN
-        m.network_manager.send_message("start_game", m.game_authority.floor_seed)
-        self.on_start_game(m.game_authority.floor_seed)    
-
-    def leave_lobby(self):
-        m = self.model
-        m.lobby_open = False
-        self._leave_network()
-        self._stop_threads("broadcaster")
-        m.connected_ids.clear()
-        self.view.clear_all_ui_elements()
-        self.view.show_main_menu_screen()
-
-    # host migration (P2P)
     def check_host_migration(self):
         m = self.model
         nm = m.network_manager
@@ -328,81 +412,8 @@ class GameController(MessageHandlers):
                 if cube.step_requested and not cube.has_activated and not cube.is_disappearing:
                     cube.step_requested = False
 
-    # Game loop 
-    def update_network(self):
-        nm = self.model.network_manager
-        if nm:
-            nm.process_queue(self.handle_message)
-            self.check_host_migration()
-            self._remember()
-        if self._rejoin_wait_until and time.time() > self._rejoin_wait_until: 
-            self._rejoin_wait_until = None
-            self._destroy_tagged('pause_text')
-            application.resume()
-        self._update_countdown()
+    #  Rejoin after an interruption 
 
-    def update_gameplay(self):
-        m = self.model
-        nm = m.network_manager
-        if not m.level_loaded or m.player is None or m.game_over:
-            return
-        player = m.player
-        for entity in scene.entities:         # ask the host to activate the block we stand on
-            if isinstance(entity, FloorCube):
-                entity.updateColliders(player)
-                if (entity.collider_added and not entity.has_activated and not entity.step_requested
-                        and not entity.is_disappearing and entity.is_player_standing_on(player)):
-                    entity.step_requested = True
-                    self.request_block_step(entity.block_id)
-
-        if not m.player_died_reported and player.world_position.y < -20:   # we fell off the floors
-            m.player_died_reported = True
-            player.gameOver()
-            self.request_player_died()
-            rejoin_store.clear(nm.player_id)                  # eliminated: no rejoin
-
-        if m.game_over or m.player is None or not nm or nm.player_id is None:
-            return
-        nm.send_message("update_pos", nm.player_id, player.x, player.y, player.z)    # tell the others
-        if nm.is_host and m.game_authority is not None:       
-            m.game_authority.handle_update_pos(nm.player_id, player.x, player.y, player.z)
-            self.on_state_snapshot(m.game_authority.snapshot_payload())
-
-    def input(self, key):
-        if key == 'escape' and self.model.level_loaded:
-            self.reset_floor()
-
-    # The game world 
-    def _build_world(self, floor_seed, player_id):
-        """Floors, sky and our player, held still up high."""
-        m = self.model
-        m.player_died_reported = False
-        apply_floor_seed(floor_seed)
-        m.floors = Floor()
-        m.sky = Entity(model="sphere", texture=os.path.join("assets", "sky.png"), scale=9999, double_sided=True)
-        top_floor_y = (FLOOR_COUNT - 1) * FLOOR_HEIGHT
-        for cube in m.floors.floor_cubes:     # only the top floor has colliders at the beginning for minimalize resources
-            if abs(cube.y - top_floor_y) < 0.01:
-                cube.collider = "box"
-                cube.collider_added = True
-        m.player = Player(get_random_position() + Vec3(0, 10, 0), f"Player {player_id}")
-        m.player.gravity = 0
-        camera.z = -5
-        m.game_over = False
-
-    def _destroy_world(self):
-        m = self.model
-        for entity in (m.player, m.floors, m.sky, *m.other_players.values()):
-            if entity is not None:
-                destroy(entity)
-        m.other_players.clear()
-        m.connected_ids.clear()
-        m.player = m.floors = m.sky = None
-        m.level_loaded = False
-        m.game_over = False
-        self._countdown_end = None
-
-    # Rejoin after an interruption 
     def _remember(self):
         """A client in a match rewrites the rejoin file once a second."""
         m = self.model
