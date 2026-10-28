@@ -99,7 +99,8 @@ The address of the matchmaking server is set in `shared/config.py`.
 ### Project layout
 
 ```
-shared/    network and rules, used by both sides (never touches the graphics)
-server/    matchmaking_server.py, game_instance.py
-tests/     automatic tests
+shared/    network and rules, used by both sides
+client/    mvc, assets, classes
+server/    matchmaking_server, game_instance, dashboard
+tests/     python tests
 ```
