@@ -17,13 +17,13 @@ def _is_docker_virtual_network(ip):
     return octets[0] == 172 and 16 <= octets[1] <= 31
 
 def _local_ipv4_addresses():
-    """IPv4 address of each network card of this PC."""
+    """IPv4 address of each network card of PC."""
     found = set()
     try:
         found.update(socket.gethostbyname_ex(socket.gethostname())[2])
     except Exception:                      
         pass
-    try:                                   # the address of the card used for the default route
+    try:                                   
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         probe.connect(("192.0.2.1", 9))    
         found.add(probe.getsockname()[0])
@@ -102,7 +102,8 @@ class DiscoveryListener:
     def __init__(self, port=BROADCAST_PORT):
         self.port = port
         self.running = False
-        # hosts: ip -> (player_id, game_port, last_seen_time)
+        # hosts: (player_id, game_port) -> (ip, last_seen_time). One entry per host, even if it announces from
+        # several network cards (same id and port, different IPs): we keep the first IP we saw.
         self.hosts = {}
         self.bind_failed = False
 
@@ -135,7 +136,8 @@ class DiscoveryListener:
                         if _is_docker_virtual_network(addr[0]):
                             continue
                         now = time.time()
-                        self.hosts[(addr[0], game_port)] = (player_id, game_port, now)
+                        old = self.hosts.get((player_id, game_port))
+                        self.hosts[(player_id, game_port)] = (old[0] if old else addr[0], now)
                     except:
                         continue
             except socket.timeout:
@@ -154,7 +156,7 @@ class DiscoveryListener:
         while self.running:
             now = time.time()
             to_delete = []
-            for key, (player_id, game_port, last_seen) in self.hosts.items():
+            for key, (ip, last_seen) in list(self.hosts.items()):
                 if now - last_seen > self.HOST_TIMEOUT:
                     to_delete.append(key)
             for key in to_delete:
@@ -163,7 +165,7 @@ class DiscoveryListener:
             time.sleep(1.0)
 
     def get_hosts(self):
-        return [(ip, player_id, game_port) for (ip, _), (player_id, game_port, _) in self.hosts.items()]
+        return [(ip, player_id, game_port) for (player_id, game_port), (ip, _) in list(self.hosts.items())]
 
     def stop(self):
         self.running = False

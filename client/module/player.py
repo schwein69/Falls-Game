@@ -96,7 +96,9 @@ class Player(FirstPersonController, AnimatedCharacterMixin):
             self.can_dash = False
 
         dt = time.dt
-        time.dt = min(dt, 1 / 30)                             
+        if dt > 0.1:
+            print(f"[Game] frame lungo: {dt:.2f}s")             # se lo vedi prima di una caduta/incastro, e' questa la causa
+        time.dt = min(dt, 1 / 30)                              # un frame lungo non deve far affondare o attraversare i blocchi
         super().update()
         time.dt = dt
 
@@ -124,10 +126,16 @@ class RemotePlayer(Entity, AnimatedCharacterMixin):
         self.name_tag = Text(text=username, parent=self, y=2.5, scale=5, billboard=True, color=color.white)
 
         self.prev_pos = position
+        self.target_position = position     
 
         self.load_animations()
 
     def update(self):
+        gap = self.target_position - self.position
+        if gap.length() > 5:                
+            self.position = self.target_position
+        else:
+            self.position += gap * min(1, time.dt * 20)
         self.name_tag.world_position = self.world_position + Vec3(0, 1.5, 0)
 
         move_vec = self.position - self.prev_pos

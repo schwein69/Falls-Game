@@ -21,9 +21,9 @@ def start_online_session():
     return nm
 
 
-# Find the matchmaking server: first try to find it on the LAN, then fall back to the configured hostname.
+# Find the matchmaking server: MATCHMAKING_HOSTNAME if set, otherwise its UDP announcement on the LAN.
 def _find_server():
-    if os.environ.get("MATCHMAKING_HOSTNAME"):
+    if MATCHMAKING_HOSTNAME:
         return MATCHMAKING_HOSTNAME, MATCHMAKING_TCP_PORT
     listener = DiscoveryListener(port=MATCHMAKING_DISCOVERY_PORT)
     try:
@@ -38,7 +38,8 @@ def _find_server():
             time.sleep(0.1)
     finally:
         listener.stop()
-    return MATCHMAKING_HOSTNAME, MATCHMAKING_TCP_PORT
+    raise ConnectionError("Matchmaking server non trovato sulla rete: controlla che sia acceso "
+                          "oppure imposta la variabile MATCHMAKING_HOSTNAME con il suo IP.")
 
 
 # Runs in a thread: find the server, join the queue (TCP) and wait. WAIT = keep waitin;
