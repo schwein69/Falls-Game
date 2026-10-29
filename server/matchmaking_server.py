@@ -9,6 +9,7 @@ import redis
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "shared"))
 from config import *
+from network_discovery import DiscoveryBroadcaster   
 
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 _redis_warned = False                
@@ -269,6 +270,9 @@ def start_matchmaking():
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((SERVER_BIND, MATCHMAKING_TCP_PORT))
         s.listen()
+        # Announce this server on the LAN every second (UDP broadcast on MATCHMAKING_DISCOVERY_PORT), so the clients
+        # find it without knowing its IP".
+        DiscoveryBroadcaster("-1", MATCHMAKING_TCP_PORT, port=MATCHMAKING_DISCOVERY_PORT).start()
         print(f"{LOG_PREFIX} Matchmaking server listening on {SERVER_BIND}:{MATCHMAKING_TCP_PORT}")
         print(f"{LOG_PREFIX} Stato condiviso su Redis ({REDIS_HOST}:{REDIS_PORT}, chiave "
               f"'{STATUS_KEY}') — avvia la dashboard con: streamlit run streamlit_dashboard.py")
