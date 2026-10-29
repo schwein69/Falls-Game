@@ -1,4 +1,4 @@
-import json, os, socket, sys, tempfile, threading, time, unittest
+import json, os, socket, sys, tempfile, threading, time, unittest, re
 from unittest.mock import patch
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -149,7 +149,28 @@ class TestQueue(Base):
         self.assertEqual(mm.find_game_of(99), "NOT_FOUND")
         answer = self.read_until(self.connect(0, rejoin_id=10), "GAME")   
         self.assertIn(str(BASE), answer)
-
+    
+    def test_make_two_matches_and_one_waits(self):
+    # 7 players, 3 per match: two games start and the last player stays in the queue.
+        def fake_start(group, port):
+            for *_, conn in group:
+                conn.sendall(f"GAME:h:{port}".encode())
+        ports = {}
+        with patch.object(mm, "_start_game", fake_start), patch.object(mm, "MAX_PLAYERS", 3), \
+                patch.object(mm, "MAX_ACTIVE_GAMES", 5):
+            players = {}
+            for pid in range(1, 8):
+                players[pid] = self.connect(pid)                      
+                if pid % 3 != 0:
+                    self.assertEqual(self.read_until(players[pid], "WAIT"), "WAIT")
+                elif pid <= 6:
+                    for member in (pid - 2, pid - 1, pid):             # the whole group gets the address
+                        text = self.read_until(players[member], "GAME:h:")
+                        ports[member] = int(re.search(r"GAME:h:(\d+)", text).group(1))
+        self.assertEqual({ports[i] for i in (1, 2, 3)}, {BASE})
+        self.assertEqual({ports[i] for i in (4, 5, 6)}, {BASE + 1})
+        self.assertEqual([p[0] for p in mm.pending_clients], [7], "the seventh player is still in the queue")
+        self.assertEqual(sorted(mm.active_processes), [BASE, BASE + 1])
 
 class TestRestart(Base):
     def test_running_game_is_adopted_after_restart(self):

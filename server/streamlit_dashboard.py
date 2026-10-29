@@ -5,7 +5,7 @@ import time
 import streamlit as st
 import redis
 
-REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")   
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 STATUS_KEY = "matchmaking:status"
 REFRESH_SECONDS = 2
@@ -18,8 +18,8 @@ def get_redis_client():
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 
+# Returns (status, error): (None, None) if the key is missing, (None, message) on failure.
 def load_status(client):
-    """Legge e decodifica lo stato da Redis."""
     try:
         raw = client.get(STATUS_KEY)
         if raw is None:
@@ -31,6 +31,7 @@ def load_status(client):
         return None, f"Errore leggendo lo stato: {e}"
 
 
+# Draw the page inside the placeholder; calling it again replaces the content.
 def render(placeholder):
     with placeholder.container():
         st.title("Falls Game — Matchmaking Dashboard")
@@ -66,7 +67,7 @@ def render(placeholder):
             rows = []
             for port, info in active_games.items():
                 started = info.get("start_ts", 0)
-                elapsed = time.time() - started if started else 0
+                elapsed = time.time() - started if started else 0     # seconds since the match started
                 rows.append({
                     "Porta proxy": port,
                     "Giocatori": ", ".join(str(p) for p in info.get("players", [])),
