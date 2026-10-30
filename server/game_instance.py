@@ -27,7 +27,6 @@ def make_message_handler(nm, authority, ready_state):
         method = payload.get("method")
         args = payload.get("args", [])
         sender = payload.get("sender_id")
-        internal = sender is not None and sender in (0, nm.player_id)
 
         if method == "player_ready":                                    
             if ready_state["countdown_started"]:
@@ -41,9 +40,7 @@ def make_message_handler(nm, authority, ready_state):
                 nm.broadcast_message("start_countdown")
             return
 
-        _, events = authority.apply(sender, method, args, internal)
-        for name, event_args in events:
-            nm.broadcast_message(name, *event_args)
+        authority.apply_and_broadcast(nm, sender, method, args)
 
     return handle
 
@@ -87,10 +84,7 @@ def play(nm, authority, players_info):
     """Whole life of a match: wait for the players, start, run until everybody has left."""
     expected_count = len(players_info)
 
-    def on_client_joined(pid, addr):             
-        nm.send_to(addr, "sync_state", authority.already_destroyed_blocks(), authority.snapshot_payload(),
-                   authority.floor_seed)           
-    nm.room.on_join = on_client_joined
+    nm.room.on_join = lambda pid, addr: authority.send_state_to(nm, addr)      # who joins or rejoins gets the match state
 
     print(f"{LOG_PREFIX}[Server] Avviato. Seed pavimento: {authority.floor_seed}. "
           f"Attendo {expected_count} giocatori: {players_info}")

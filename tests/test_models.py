@@ -243,5 +243,48 @@ class TestApply(unittest.TestCase):
         self.assertNotIn(1, self.auth.player_positions)
         self.assertNotIn(3, self.auth.destroyed_blocks)
 
+
+class TestAuthorityHelpers(unittest.TestCase):
+    class FakeNM:
+        player_id = 1
+
+        def __init__(self):
+            self.broadcasts, self.direct = [], []
+
+        def broadcast_message(self, name, *args):
+            self.broadcasts.append((name, args))
+
+        def send_to(self, addr, name, *args):
+            self.direct.append((addr, name, args))
+
+    def test_apply_and_broadcast_tells_everybody_and_the_host_screen(self):
+        # Each event is sent to everybody, and also shown through `show`).
+        auth, nm, shown = GameAuthority(), self.FakeNM(), []
+        auth.apply_and_broadcast(nm, 2, "block_step", [2, 7], show=lambda name, args: shown.append(name))
+        self.assertEqual(nm.broadcasts, [("block_destroyed", (7, 2))])
+        self.assertEqual(shown, ["block_destroyed"])
+
+    def test_apply_and_broadcast_without_screen_and_without_events(self):
+        # The server has no `show`; a position update changes the state but sends no event.
+        auth, nm = GameAuthority(), self.FakeNM()
+        auth.apply_and_broadcast(nm, 2, "update_pos", [2, 1, 2, 3])
+        self.assertEqual(nm.broadcasts, [])
+        self.assertEqual(auth.player_positions, {2: (1, 2, 3)})
+
+    def test_a_client_cannot_pass_for_someone_else(self):
+        # Client 5 says player 7 died: only 5 counts, because 5 is not the host/server.
+        auth, nm = GameAuthority(), self.FakeNM()
+        auth.apply_and_broadcast(nm, 5, "player_died", [7])
+        self.assertEqual(auth.dead_players, {5})
+
+    def test_send_state_to_one_client(self):
+        # Who joins gets the destroyed blocks, the positions and the floor seed, and nobody else.
+        auth, nm = GameAuthority(), self.FakeNM()
+        auth.handle_block_step(3, 9)
+        auth.send_state_to(nm, ("h", 1))
+        self.assertEqual(nm.direct, [(("h", 1), "sync_state", ([9], {}, auth.floor_seed))])
+        self.assertEqual(nm.broadcasts, [])
+
+
 if __name__ == "__main__":
     unittest.main()

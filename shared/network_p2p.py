@@ -32,9 +32,7 @@ def _become_host(player_id=0, restore=None, pending_ids=()):
         authority.destroyed_blocks = set(destroyed_blocks)
         authority.player_positions = dict(player_positions)
 
-    nm.room.on_join = lambda pid, addr: nm.send_to(
-        addr, "sync_state", authority.already_destroyed_blocks(), authority.snapshot_payload(),
-        authority.floor_seed)
+    nm.room.on_join = lambda pid, addr: authority.send_state_to(nm, addr)
 
     bound_port = _bind_to_first_free_port(nm, player_id)
     if bound_port is None:

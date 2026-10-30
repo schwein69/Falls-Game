@@ -35,7 +35,8 @@ class GameAuthority:
 
     # Pavimento
     def handle_block_step(self, pid, block_id):
-        """Un client segnala di essere passato sul blocco block_id."""
+        """Un client segnala di essere passato sul blocco block_id. Ritorna il payload da
+        trasmettere a tutti se e' la prima volta che viene distrutto, altrimenti None."""
         if block_id is None:
             return None
         if block_id in self.destroyed_blocks:
@@ -44,6 +45,7 @@ class GameAuthority:
         return {"block_id": block_id, "pid": pid}
 
     def already_destroyed_blocks(self):
+        """Usato per il 'catch-up' di chi si unisce o si riconnette a partita in corso."""
         return list(self.destroyed_blocks)
 
     # Posizioni
@@ -62,8 +64,8 @@ class GameAuthority:
     def snapshot_payload(self):
         return {pid: list(pos) for pid, pos in self.player_positions.items()}
 
+    # Apply a request from a client and return the events to broadcast. internal = True if the sender is the host itself.
     def apply(self, sender, method, args, internal=False):
-        """Applica una richiesta ("update_pos", "block_step", "player_died", "player_left")."""
         pid = args[0] if internal and args else sender
         out = pid in self.dead_players or pid in self.left_players       
         events = []
@@ -72,7 +74,7 @@ class GameAuthority:
                 _, x, y, z = args
                 if not out and all(isinstance(v, (int, float)) for v in (x, y, z)):
                     self.handle_update_pos(pid, x, y, z)
-                return False, events          # le posizioni viaggiano negli snapshot, non servono eventi
+                return False, events         
 
             if method == "block_step":
                 _, block_id = args
@@ -95,6 +97,44 @@ class GameAuthority:
             if game_over:
                 events.append(("game_won", (winner,)))
             return True, events
-        except (ValueError, TypeError):       
+        except (ValueError, TypeError):      
             return False, []
-    
+
+    # Apply a request and tell everybody what happened. nm = the host/server that sends.
+    # show = optional function(name, args): the P2P host also draws each event on its own screen.
+    def apply_and_broadcast(self, nm, sender, method, args, show=None):
+        internal = sender is not None and sender in (0, nm.player_id)   
+        _, events = self.apply(sender, method, args, internal)
+        for name, event_args in events:
+            if show is not None:
+                show(name, event_args)
+            nm.broadcast_message(name, *event_args)
+
+    # To one client only: destroyed blocks, positions and floor seed.
+    def send_state_to(self, nm, addr):
+        nm.send_to(addr, "sync_state", self.already_destroyed_blocks(), self.snapshot_payload(), self.floor_seed)
+
+    # Serialize the authority state to a dictionary, to send to a backup.
+    def to_dict(self):
+        return {
+            "floor_seed": self.floor_seed,
+            "destroyed_blocks": list(self.destroyed_blocks),
+            "player_positions": {str(pid): list(pos) for pid, pos in self.player_positions.items()},
+            "known_players": list(self.known_players),
+            "dead_players": list(self.dead_players),
+            "left_players": list(self.left_players),
+            "game_won": self.game_won,
+        }
+
+    @classmethod
+    # Recreates the authority from a dictionary (used for backup/restore).
+    def from_dict(cls, data):
+        auth = cls()
+        auth.floor_seed = data["floor_seed"]
+        auth.destroyed_blocks = set(data["destroyed_blocks"])
+        auth.player_positions = {int(pid): tuple(pos) for pid, pos in data["player_positions"].items()}
+        auth.known_players = set(data["known_players"])
+        auth.dead_players = set(data["dead_players"])
+        auth.left_players = set(data["left_players"])
+        auth.game_won = data["game_won"]
+        return auth

@@ -25,17 +25,13 @@ class MessageHandlers:
         else:
             nm.send_message(method, nm.player_id, *args)
 
-    # Host only: the rules live in GameAuthority.apply (same ones as the online server).
-    # Every resulting event is shown on our screen and broadcast to the others.
+    # Apply a request to the authority and broadcast the events to all players. Only the host/server has an authority.
     def _apply_to_authority(self, sender, method, args):
         auth = self._host_authority()
         if auth is None:
             return
-        nm = self.model.network_manager
-        _, events = auth.apply(sender, method, args, internal=sender in (0, nm.player_id))  
-        for name, event_args in events:
-            getattr(self, "on_" + name)(*event_args)      # show it here
-            nm.broadcast_message(name, *event_args)       # and tell the others
+        auth.apply_and_broadcast(self.model.network_manager, sender, method, args,
+                                 show=lambda name, event_args: getattr(self, "on_" + name)(*event_args))   
 
     # Called by the blocks when the local player steps on one: the authority decides if it breaks.
     def request_block_step(self, block_id):
