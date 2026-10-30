@@ -287,9 +287,9 @@ class GameController(MessageHandlers):
         """Back to the main menu: remove the world, leave the network, stop the helper threads."""
         m = self.model
         m.lobby_open = False
-        self.view.clear_all_ui_elements()
         application.resume()                  # in case we were paused
         self._destroy_world()
+        self.view.clear_all_ui_elements() 
         self._leave_network()
         m.game_authority = None
         self._stop_threads("broadcaster", "current_listener")

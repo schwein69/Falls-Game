@@ -16,8 +16,8 @@ from config import LOG_PREFIX, REDIS_HOST, REDIS_PORT, GAME_KEY_PREFIX
 
 JOIN_TIMEOUT_SECONDS = 20       # max wait for the players to connect; after that we start with who is here
 IDLE_SHUTDOWN_SECONDS = 3       # nobody connected for this long -> the match is over, close the process
-STATUS_POLL_INTERVAL = 0.1      # pause between two turns of the waiting loops
-SNAPSHOT_INTERVAL = 0.025       # every 25 ms the positions of all players are sent to everybody
+STATUS_POLL_INTERVAL = 0.1      
+SNAPSHOT_INTERVAL = 0.025       
 STATUS_TTL = 3                  # the Redis key of the game expires after 3 s unless it is renewed
 
 

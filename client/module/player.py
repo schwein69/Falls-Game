@@ -96,8 +96,6 @@ class Player(FirstPersonController, AnimatedCharacterMixin):
             self.can_dash = False
 
         dt = time.dt
-        if dt > 0.1:
-            print(f"[Game] frame lungo: {dt:.2f}s")             # se lo vedi prima di una caduta/incastro, e' questa la causa
         time.dt = min(dt, 1 / 30)                              # un frame lungo non deve far affondare o attraversare i blocchi
         super().update()
         time.dt = dt
