@@ -14,19 +14,8 @@ import rejoin_store
 from .message_handler import MessageHandlers
 
 
-class GameController(MessageHandlers):
-
-    def __init__(self, model, view):
-        self.model = model
-        self.view = view
-        self._last_saved = 0.0           # last time the rejoin file was written
-        self._rejoin = None              # state of the rejoin in progress (None = no rejoin)
-        self._rejoin_prompt = []         # widgets of the "do you want to rejoin?" offer
-        self._rejoin_wait_until = None   # after rejoining: time limit to wait for the resume message
-        self._countdown_end = None       # when the 3-2-1 ends (None = no countdown)
-        self._countdown_shown = None     # the number currently on screen
-
-    #  Small helpers: on-screen text and network shutdown 
+class ControllerHelpers:
+    """Small helpers: on-screen text and shutdown of network and threads."""
 
     def _say(self, text, y, tag=None, scale=1.2):
         """Centered text on screen. With a tag it can be removed later with _destroy_tagged."""
@@ -63,13 +52,15 @@ class GameController(MessageHandlers):
             rejoin_store.clear(nm.player_id)
             self._drop_network(deliberate=True)
 
-    #  P2P sessions (menu -> host or join) 
+
+class Sessions:
+    """Menus -> P2P host/join, online matchmaking, and the lobby."""
 
     def start_local_host_session(self):
         m = self.model
         self.view.clear_all_ui_elements()
         m.network_manager, m.game_authority, m.broadcaster = network_p2p.start_p2p_host()
-        if m.game_authority is None:          # the P2P port is taken: a host already exists on this PC
+        if m.game_authority is None:         
             self._drop_network()
             self.view.display_error_message_screen(
                 "Esiste gia' una sessione host attiva su questo PC. "
@@ -127,8 +118,6 @@ class GameController(MessageHandlers):
         else:
             invoke(self.poll_p2p_join_outcome, nm, started_at, timeout, delay=0.2)
 
-    # Online sessions (matchmaking) 
-
     def start_online_client_session(self):
         m = self.model
         self.view.clear_all_ui_elements()
@@ -161,14 +150,12 @@ class GameController(MessageHandlers):
         self._drop_network()
         self.view.show_main_menu_screen()
 
-    # Lobby 
-
     def begin_game(self):
         m = self.model
         m.network_manager.room.closed = True  # no new players from now on, only rejoins
         self._stop_threads("broadcaster")     # stop announcing the game on the LAN
         m.network_manager.send_message("start_game", m.game_authority.floor_seed)
-        self.on_start_game(m.game_authority.floor_seed)    
+        self.on_start_game(m.game_authority.floor_seed)
 
     def leave_lobby(self):
         m = self.model
@@ -179,7 +166,9 @@ class GameController(MessageHandlers):
         self.view.clear_all_ui_elements()
         self.view.show_main_menu_screen()
 
-    # Match start: load level, ready, countdown
+
+class MatchFlow:
+    """Start of the match (load level, ready, 3-2-1), the game world and the way back to the menu."""
 
     def load_level(self, floor_seed=None):
         m = self.model
@@ -252,8 +241,6 @@ class GameController(MessageHandlers):
         if m.network_manager:
             m.network_manager.room.match_started = True
 
-    # ---- The game world ----
-
     def _build_world(self, floor_seed, player_id):
         """Floors, sky and our player, held still up high."""
         m = self.model
@@ -295,7 +282,9 @@ class GameController(MessageHandlers):
         self._stop_threads("broadcaster", "current_listener")
         invoke(self.view.show_main_menu_screen, delay=1)
 
-    # Game loop 
+
+class GameLoop:
+    """What runs every frame: network messages, gameplay checks and keys."""
 
     def update_network(self):
         nm = self.model.network_manager
@@ -330,12 +319,12 @@ class GameController(MessageHandlers):
             m.player_died_reported = True
             player.gameOver()
             self.request_player_died()
-            rejoin_store.clear(nm.player_id)                  # eliminated: no rejoin
+            rejoin_store.clear(nm.player_id)                 
 
         if m.game_over or m.player is None or not nm or nm.player_id is None:
             return
 
-        # Send our position to the host (or to the others if we are the host). The host will broadcast it to everybody.
+        # Send our position to the host. The host will broadcast it to everybody.
         if nm.is_host and m.game_authority is not None:
             m.game_authority.handle_update_pos(nm.player_id, player.x, player.y, player.z)
             self.on_state_snapshot(m.game_authority.snapshot_payload())
@@ -346,7 +335,9 @@ class GameController(MessageHandlers):
         if key == 'escape' and self.model.level_loaded:
             self.reset_floor()
 
-    # Host migration (P2P) 
+
+class HostMigration:
+    """P2P only: the host disappears, the survivor with the lowest id takes over."""
 
     def check_host_migration(self):
         m = self.model
@@ -418,7 +409,9 @@ class GameController(MessageHandlers):
                 if cube.step_requested and not cube.has_activated and not cube.is_disappearing:
                     cube.step_requested = False
 
-    #  Rejoin after an interruption 
+
+class Rejoin:
+    """Coming back to a match after an interruption (same id, state sent by the host)."""
 
     def _remember(self):
         """A client in a match rewrites the rejoin file once a second."""
@@ -467,7 +460,7 @@ class GameController(MessageHandlers):
         online = saved["mode"] == "online"
         if online:
             m.network_manager = network_online.start_online_rejoin(saved["player_id"])
-        self._rejoin = {"saved": saved, "started": time.time(), "tried": set(), "error": None, "joined_at": None,
+        self._rejoin = {"saved": saved, "started": time.time(),
                         "listener": None if online else network_p2p.start_host_discovery_scan()}
         invoke(self._poll_rejoin, delay=0.2)
 
@@ -480,35 +473,39 @@ class GameController(MessageHandlers):
             traceback.print_exc()
             self._abort_rejoin(f"errore interno ({e})")
 
+    # Every 0.2 s: stop the rejoin if something went wrong, otherwise keep looking for the host.
     def _poll_rejoin_step(self):
-        """Every 0.2 s: wait for the id to be confirmed."""
         m, r = self.model, self._rejoin
         if r is None or not getattr(m, 'rejoin_pending', False):
             return                                            # cancelled, or already completed
-        nm, wanted = m.network_manager, r["saved"]["player_id"]
-        if nm is not None and nm.player_id is not None:       # recognized: only the game state is missing
-            if nm.player_id != wanted:
-                return self._abort_rejoin("non e' stato possibile ritrovare il tuo posto.")
-            r["joined_at"] = r["joined_at"] or time.time()
-            if time.time() - r["joined_at"] > 5:
-                return self._abort_rejoin("lo stato della partita non e' arrivato.")
-        elif nm is not None and nm.join_rejected is not None:
-            if r["listener"] is None:                         # Online: No rejoin attempt possible, the matchmaking rejected us
-                return self._abort_rejoin(nm.join_rejected)
-            r["error"] = nm.join_rejected                     # P2P: wrong host, try the next one
-            self._drop_network()
-        elif nm is not None and nm.online.status == "error":
-            return self._abort_rejoin(nm.online.error or "matchmaking non raggiungibile.")
-        elif nm is None and r["listener"] is not None:        # P2P: hosts found on the LAN
-            fresh = [(ip, port) for ip, _, port in r["listener"].get_hosts() if (ip, port) not in r["tried"]]
-            if fresh:
-                r["tried"].add(fresh[0])
-                m.network_manager = network_p2p.join_p2p_host(*fresh[0], rejoin_id=wanted)
-            elif r["tried"]:                                  # all tried
-                return self._abort_rejoin(r["error"] or "nessun host a cui rientrare.")
-        if time.time() - r["started"] > 20:
-            return self._abort_rejoin("nessuna partita da riprendere trovata.")
+        problem = self._rejoin_problem()
+        if problem:
+            return self._abort_rejoin(problem)
+        if m.network_manager is None and r["listener"] is not None:
+            self._join_first_host_found()                     # P2P only
         invoke(self._poll_rejoin, delay=0.2)
+
+    # Why the rejoin failed, or None if it is going fine.
+    def _rejoin_problem(self):
+        r, nm = self._rejoin, self.model.network_manager
+        if nm is not None:
+            if nm.join_rejected is not None:                  # host or matchmaking refused us
+                return nm.join_rejected
+            if nm.online.status == "error":
+                return nm.online.error or "matchmaking non raggiungibile."
+            if nm.player_id not in (None, r["saved"]["player_id"]):
+                return "non e' stato possibile ritrovare il tuo posto."
+        if time.time() - r["started"] > 20:
+            return "nessuna partita da riprendere trovata."
+        return None
+
+    # P2P: join the first host seen on the LAN, with our old id.
+    def _join_first_host_found(self):
+        r = self._rejoin
+        hosts = r["listener"].get_hosts()
+        if hosts:
+            ip, _, port = hosts[0]
+            self.model.network_manager = network_p2p.join_p2p_host(ip, port, rejoin_id=r["saved"]["player_id"])
 
     def _end_rejoin(self):
         r = self._rejoin
@@ -566,3 +563,17 @@ class GameController(MessageHandlers):
         best = min(pool, key=lambda c: (distance_xz(pos, c.position), -top(c)))
         print(f"[Game] Sotto la posizione di rientro non c'e' piu' terreno: ti posiamo sul blocco {best.block_id}.")
         return Vec3(best.x, top(best), best.z)
+
+
+class GameController(ControllerHelpers, Sessions, MatchFlow, GameLoop, HostMigration, Rejoin, MessageHandlers):
+    """The whole controller: the parts above plus the handlers of the network messages."""
+
+    def __init__(self, model, view):
+        self.model = model
+        self.view = view
+        self._last_saved = 0.0           # last time the rejoin file was written
+        self._rejoin = None              # state of the rejoin in progress (None = no rejoin)
+        self._rejoin_prompt = []         # widgets of the "do you want to rejoin?" offer
+        self._rejoin_wait_until = None   # after rejoining: time limit to wait for the resume message
+        self._countdown_end = None       # when the 3-2-1 ends (None = no countdown)
+        self._countdown_shown = None     # the number currently on screen
