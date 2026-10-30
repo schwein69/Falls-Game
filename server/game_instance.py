@@ -18,6 +18,7 @@ JOIN_TIMEOUT_SECONDS = 20       # max wait for the players to connect; after tha
 IDLE_SHUTDOWN_SECONDS = 3       # nobody connected for this long -> the match is over, close the process
 STATUS_POLL_INTERVAL = 0.1      
 SNAPSHOT_INTERVAL = 0.025       
+READY_SAFETY_NET_SECONDS = 10   # if somebody never says ready, the countdown starts anyway
 STATUS_TTL = 3                  # the Redis key of the game expires after 3 s unless it is renewed
 
 
@@ -34,10 +35,8 @@ def make_message_handler(nm, authority, ready_state):
             ready_state["ready_pids"].add(sender)
             print(f"{LOG_PREFIX} Player {sender} pronto "
                   f"({len(ready_state['ready_pids'])}/{ready_state['expected_count']})")
-            if len(ready_state["ready_pids"]) >= ready_state["expected_count"]:   
-                ready_state["countdown_started"] = True
-                nm.room.match_started = True                            
-                nm.broadcast_message("start_countdown")
+            if len(ready_state["ready_pids"]) >= ready_state["expected_count"]:
+                start_countdown(nm, ready_state)
             return
 
         authority.apply_and_broadcast(nm, sender, method, args)
@@ -56,90 +55,111 @@ def keep_game_key(r, key, info, stop):
         stop.wait(1.0)                             
 
 
+# Sets everything up, runs play() once, and always cleans up at the end.
 def run_game(port, players_info):
-    """Start the server on `port`, publish the game on Redis, play, then clean everything up."""
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-    r.ping()                                     
+    r.ping()
+    
+    # The network side: sockets + accept/receive/heartbeat threads, listening on `port`.
     nm = start_dedicated_server(port, players_info)
-    key = GAME_KEY_PREFIX + str(port)             
+
+    # Thread that renews the Redis key every second.
+    key = GAME_KEY_PREFIX + str(port)
     info = {"port": port, "players": [p[0] for p in players_info], "pid": os.getpid(), "start_ts": time.time()}
-    stop = threading.Event()                     
+    stop = threading.Event()                      # flag used to ask that thread to finish
     key_thread = threading.Thread(target=keep_game_key, args=(r, key, info, stop), daemon=True)
     key_thread.start()
+
     try:
-        play(nm, GameAuthority(), players_info)
-    except KeyboardInterrupt:
-        pass                                       
-    finally:
-        stop.set()
-        key_thread.join()                          
+        play(nm, GameAuthority(), players_info)   
+    except KeyboardInterrupt:                     
+        pass
+    finally:                                     
+        stop.set()                               
+        key_thread.join()                         
         try:
-            r.delete(key)                          
+            r.delete(key)                         
         except redis.RedisError:
-            pass                                   
-        nm.stop()
+            pass
+        nm.stop()                                 
+
+# Start the countdown for everybody, only once. Called when all the players are ready or when the safety net expires.
+def start_countdown(nm, ready_state):
+    if ready_state["countdown_started"]:
+        return
+    ready_state["countdown_started"] = True
+    nm.room.match_started = True                  
+    nm.broadcast_message("start_countdown")
 
 
-def play(nm, authority, players_info):
-    """Whole life of a match: wait for the players, start, run until everybody has left."""
-    expected_count = len(players_info)
-
-    nm.room.on_join = lambda pid, addr: authority.send_state_to(nm, addr)      # who joins or rejoins gets the match state
-
-    print(f"{LOG_PREFIX}[Server] Avviato. Seed pavimento: {authority.floor_seed}. "
-          f"Attendo {expected_count} giocatori: {players_info}")
-
-    ready_state = {"ready_pids": set(), "countdown_started": False, "expected_count": expected_count}
-    message_handler = make_message_handler(nm, authority, ready_state)
-
+# Waiting room: handle the messages until all the players are connected.
+# Returns True to start the match, False if it must be closed (nobody came, or everybody left).
+def wait_for_players(nm, handle, expected_count):
     start_wait = time.time()
     seen_any, empty_since = False, None
     while len(nm.room.clients) < expected_count:
-        nm.process_queue(message_handler)
-        if nm.room.clients:                                         
+        nm.process_queue(handle)
+        if nm.room.clients:
             seen_any, empty_since = True, None
-        elif seen_any:                                             
+        elif seen_any:                            # everybody left before the start
             empty_since = empty_since or time.time()
             if time.time() - empty_since > IDLE_SHUTDOWN_SECONDS:
                 print(f"{LOG_PREFIX}[Server] Tutti usciti prima dell'inizio. Chiudo.")
-                return
+                return False
         if time.time() - start_wait > JOIN_TIMEOUT_SECONDS:
             print(f"{LOG_PREFIX}[Server] Timeout: solo {len(nm.room.clients)}/{expected_count} "
                   f"giocatori connessi. Avvio comunque con chi c'e'.")
             break
         time.sleep(STATUS_POLL_INTERVAL)
 
-    if len(nm.room.clients) == 0:
+    if not nm.room.clients:
         print(f"{LOG_PREFIX}[Server] Nessun giocatore si e' connesso. Chiudo.")
+        return False
+    return True
+
+# The MATCH: the steps in order. Wait for the players -> start -> run until everybody leaves.
+def play(nm, authority, players_info):
+    expected_count = len(players_info)
+    # Callback: when a player joins or rejoins, send him the state of the match (destroyed blocks, positions).
+    nm.room.on_join = lambda pid, addr: authority.send_state_to(nm, addr)
+    print(f"{LOG_PREFIX}[Server] Avviato. Seed pavimento: {authority.floor_seed}. "
+          f"Attendo {expected_count} giocatori: {players_info}")
+
+    ready_state = {"ready_pids": set(), "countdown_started": False, "expected_count": expected_count}
+    handle = make_message_handler(nm, authority, ready_state)
+
+    # Waiting room.
+    if not wait_for_players(nm, handle, expected_count):
         return
 
+    # Start the match: tell everybody to start, and start sending the periodic snapshots.
     ready_state["expected_count"] = len(nm.room.clients)
     print(f"{LOG_PREFIX}[Server] {len(nm.room.clients)} giocatori connessi. Via!")
     nm.broadcast_message("start_game", authority.floor_seed)
-    nm.start_broadcast_tick(authority.snapshot_payload, interval=SNAPSHOT_INTERVAL)  
+    nm.start_broadcast_tick(authority.snapshot_payload, interval=SNAPSHOT_INTERVAL)   
 
-    if (not ready_state["countdown_started"]
-            and len(ready_state["ready_pids"]) >= ready_state["expected_count"]):
-        ready_state["countdown_started"] = True
-        nm.room.match_started = True
-        nm.broadcast_message("start_countdown")
+    # The players can send "ready" messages, and when everybody is ready the countdown starts.
+    if len(ready_state["ready_pids"]) >= ready_state["expected_count"]:
+        start_countdown(nm, ready_state)
 
-    READY_SAFETY_NET_SECONDS = 10                  
+    # The match itself.
+    run_match(nm, handle, ready_state)
+
+# The MATCH LOOP: runs for the whole match. Every 0.1 s it handles the messages, makes sure the
+# countdown starts, and checks if the room is empty. It returns when everybody has left.
+def run_match(nm, handle, ready_state):
     countdown_deadline = time.time() + READY_SAFETY_NET_SECONDS
-
     last_seen_player_time = time.time()
     while True:
-        nm.process_queue(message_handler)
+        nm.process_queue(handle)                  # handle the messages from the clients
         if not ready_state["countdown_started"] and time.time() > countdown_deadline:
             print(f"{LOG_PREFIX}[Server] Non tutti pronti dopo {READY_SAFETY_NET_SECONDS}s, "
                   f"avvio comunque (rete di sicurezza).")
-            ready_state["countdown_started"] = True
-            nm.room.match_started = True
-            nm.broadcast_message("start_countdown")
+            start_countdown(nm, ready_state)
         time.sleep(STATUS_POLL_INTERVAL)
-        if len(nm.room.clients) > 0:
+        if nm.room.clients:
             last_seen_player_time = time.time()
-        elif time.time() - last_seen_player_time > IDLE_SHUTDOWN_SECONDS:    
+        elif time.time() - last_seen_player_time > IDLE_SHUTDOWN_SECONDS:
             print(f"{LOG_PREFIX}[Server] Tutti i giocatori se ne sono andati. Chiudo.")
             return
 
