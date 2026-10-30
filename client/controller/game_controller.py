@@ -315,7 +315,9 @@ class GameController(MessageHandlers):
         if not m.level_loaded or m.player is None or m.game_over:
             return
         player = m.player
-        for entity in scene.entities:         # ask the host to activate the block we stand on
+
+        # Step on a block: the host will confirm it and tell the others. The client will not send repeated requests.
+        for entity in scene.entities:
             if isinstance(entity, FloorCube):
                 entity.updateColliders(player)
                 if (entity.collider_added and not entity.has_activated and not entity.step_requested
@@ -323,7 +325,8 @@ class GameController(MessageHandlers):
                     entity.step_requested = True
                     self.request_block_step(entity.block_id)
 
-        if not m.player_died_reported and player.world_position.y < -20:   # we fell off the floors
+        # Death: if we fall below the floor, the host will confirm it and tell the others. The client will not send repeated requests.
+        if not m.player_died_reported and player.world_position.y < -20:
             m.player_died_reported = True
             player.gameOver()
             self.request_player_died()
@@ -331,10 +334,13 @@ class GameController(MessageHandlers):
 
         if m.game_over or m.player is None or not nm or nm.player_id is None:
             return
-        nm.send_message("update_pos", nm.player_id, player.x, player.y, player.z)    # tell the others
-        if nm.is_host and m.game_authority is not None:       
+
+        # Send our position to the host (or to the others if we are the host). The host will broadcast it to everybody.
+        if nm.is_host and m.game_authority is not None:
             m.game_authority.handle_update_pos(nm.player_id, player.x, player.y, player.z)
             self.on_state_snapshot(m.game_authority.snapshot_payload())
+        else:
+            nm.send_message("update_pos", nm.player_id, player.x, player.y, player.z)
 
     def input(self, key):
         if key == 'escape' and self.model.level_loaded:
