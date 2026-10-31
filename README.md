@@ -4,7 +4,6 @@ A multiplayer arena game inspired by *Fall Guys*, written in Python with the [Ur
 
 It is the final project of a Distributed Systems course: the interesting part is not the game itself, but how two or more PCs on the same local network keep **the same state** (same arena, same missing blocks, same winner), and what happens when something fails.
 
-> The game is played on a local network only. Cloud hosting is future work.
 
 ## Features
 
