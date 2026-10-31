@@ -2,17 +2,17 @@
 
 A multiplayer arena game inspired by *Fall Guys*, written in Python with the [Ursina](https://www.ursinaengine.org/) engine. Players run on a multi-layered arena of blocks that disappear shortly after being stepped on. Fall off and you are out; the last player standing wins.
 
-It is the final project of a Distributed Systems course: the interesting part is not the game itself, but how up to three PCs on the same local network keep **the same state** (same arena, same missing blocks, same winner), and what happens when something fails.
+It is the final project of a Distributed Systems course: the interesting part is not the game itself, but how two or more PCs on the same local network keep **the same state** (same arena, same missing blocks, same winner), and what happens when something fails.
 
 > The game is played on a local network only. Cloud hosting is future work.
 
 ## Features
 
 - **Two ways to play**
-  - **Local (P2P):** one player hosts and plays, the others find the host on the LAN (UDP broadcast).
-  - **Matchmaking:** players join a queue; a server starts one `game_instance` process per match.
+  - **Local (P2P with a host):** no server. One player hosts and plays (and is the authority), the others find the host on the LAN (UDP broadcast). Any player can be the host.
+  - **Matchmaking:** players join a queue; a server starts one `game_instance` process per match. Clients find the server by themselves on the LAN, no address to configure.
 - **Authoritative server:** clients only *ask* ("I step on this block"), a single authority (the host or the game process) decides and tells everybody.
-- **Fault tolerance:** heartbeat, pause when a player goes silent, 10 s grace period, rejoin with the same identity, host migration in P2P mode.
+- **Fault tolerance:** heartbeat, pause when a player goes silent, 10 s grace period, rejoin with the same identity (the game offers it at the next start), host migration in P2P mode.
 - **Consistency over availability (CAP):** on a partition the match pauses instead of diverging.
 
 ## Controls
@@ -31,7 +31,7 @@ It is the final project of a Distributed Systems course: the interesting part is
 - [Redis](https://redis.io/) — **only for matchmaking mode** (the matchmaking server refuses to start without it)
 
 ```bash
-poetry install
+poetry install --no-root
 ```
 
 ### Installing Redis
@@ -50,7 +50,7 @@ Check that it answers:
 docker exec redis redis-cli ping
 ```
 
-You should see `PONG`. By default Redis listens on `localhost:6379`.
+You should see `PONG`. By default Redis listens on `localhost:6379`. The next times, just `docker start redis`.
 
 ## How to play
 
@@ -78,9 +78,24 @@ Then start the game on each client and choose **Matchmaking**:
 poetry run python main.py
 ```
 
-When three players are in the queue, the server starts a `game_instance` process and tells everybody where to connect.
+When the queue is full, the server starts a `game_instance` process and tells everybody where to connect.
 
-The address of the matchmaking server is set in `shared/config.py`.
+**Finding the server.** The matchmaking server announces itself on the LAN with a UDP broadcast (port 15001), and the client waits up to 2 seconds for it: nothing to configure. If the broadcast does not arrive (for example behind a router), set the address by hand before starting the game:
+
+```bash
+export MATCHMAKING_HOSTNAME=192.168.1.20      # Linux / macOS
+$env:MATCHMAKING_HOSTNAME = "192.168.1.20"    # Windows PowerShell
+```
+
+**Settings** are in `shared/config.py`: `MAX_PLAYERS` (players per match, 2 by default), `MAX_ACTIVE_GAMES` (simultaneous matches, 5 by default) and the ports.
+
+**Dashboard** (optional), to see the queue and the running matches:
+
+```bash
+poetry run streamlit run server/streamlit_dashboard.py
+```
+
+**Firewall (Windows).** Allow UDP `15000` and `15001` (discovery), UDP and TCP `12345` (P2P host), TCP `9001` (matchmaking) and UDP and TCP from `10000` up (one port for each simultaneous match).
 
 ## How it works
 
@@ -92,9 +107,10 @@ The address of the matchmaking server is set in `shared/config.py`.
 
 - **Authority:** `GameAuthority` holds the rules and the state of the match. In P2P it runs on the host; in matchmaking it runs in `server/game_instance.py`. The code is the same, only the way it is started changes.
 - **Transport:** the join handshake is TCP (once); all the game traffic is UDP. A lost position packet is replaced by the next one.
-- **Snapshots:** the authority sends the positions of all players every 25 ms.
+- **Snapshots:** the authority sends the positions of all players many times per second; the clients move the other avatars smoothly towards the last position received.
 - **Redis:** used only as a registry of running matches (key `game:<port>`, TTL 3 s, renewed every second). If a game process dies, its key expires by itself, and a restarted matchmaking server adopts the matches that are still running.
-- **Failures:** the host sends a heartbeat every second. After 5 s of silence the match is paused for everybody; the player has 10 s to come back with the same id, otherwise he is removed. If the P2P host disappears, the player with the lowest id becomes the new host.
+- **Failures:** the host sends a heartbeat every second. After 5 s of silence the match is paused for everybody; the player has 10 s to come back with the same id, otherwise he is removed. If the P2P host disappears, the player with the lowest id becomes the new host, and the others find it on the LAN and rejoin with the same id.
+- **Threads:** in each program the main thread (the game) is the only one that applies the rules. The other threads (UDP receive, TCP accept, heartbeat, snapshots, LAN announcement) only read or send messages and put the received ones in a queue.
 
 ### Project layout
 
@@ -104,3 +120,5 @@ client/    mvc, assets, classes
 server/    matchmaking_server, game_instance, dashboard
 tests/     python tests
 ```
+
+Run the tests with `poetry run pytest`.
