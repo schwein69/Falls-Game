@@ -27,7 +27,7 @@ It is the final project of a Distributed Systems course: the interesting part is
 
 - Python 3
 - [Poetry](https://python-poetry.org/)
-- [Redis](https://redis.io/) — **only for matchmaking mode** (the matchmaking server refuses to start without it)
+- [Redis](https://redis.io/) 
 
 ```bash
 poetry install --no-root
@@ -35,7 +35,7 @@ poetry install --no-root
 
 ### Installing Redis
 
-Redis runs on the machine that hosts the matchmaking server. Clients and P2P players do not need it.
+Redis runs on the machine that hosts the matchmaking server. 
 
 Install [Docker](https://docs.docker.com/get-docker/), then start Redis in a container:
 
@@ -65,7 +65,7 @@ Choose **Local → Host** on one PC and **Local → Join** on the others (same n
 
 ### Matchmaking
 
-On the machine that will act as server, start Redis first (see above), then the matchmaking server:
+On the machine that will act as server, start Redis first, then the matchmaking server:
 
 ```bash
 poetry run python server/matchmaking_server.py
@@ -79,23 +79,15 @@ poetry run python main.py
 
 When the queue is full, the server starts a `game_instance` process and tells everybody where to connect.
 
-**Finding the server.** The matchmaking server announces itself on the LAN with a UDP broadcast (port 15001), and the client waits up to 2 seconds for it: nothing to configure. If the broadcast does not arrive (for example behind a router), set the address by hand before starting the game:
-
-```bash
-export MATCHMAKING_HOSTNAME=192.168.1.20      # Linux / macOS
-$env:MATCHMAKING_HOSTNAME = "192.168.1.20"    # Windows PowerShell
-```
+**Finding the server.** The matchmaking server announces itself on the LAN with a UDP broadcast, and the client waits for it: nothing to configure. 
 
 **Settings** are in `shared/config.py`: `MAX_PLAYERS` (players per match, 2 by default), `MAX_ACTIVE_GAMES` (simultaneous matches, 5 by default) and the ports.
 
-**Dashboard** (optional), to see the queue and the running matches:
+**Dashboard** to see the queue and the running matches:
 
 ```bash
 poetry run streamlit run server/streamlit_dashboard.py
 ```
-
-**Firewall (Windows).** Allow UDP `15000` and `15001` (discovery), UDP and TCP `12345` (P2P host), TCP `9001` (matchmaking) and UDP and TCP from `10000` up (one port for each simultaneous match).
-
 ## How it works
 
 ```
@@ -120,4 +112,3 @@ server/    matchmaking_server, game_instance, dashboard
 tests/     python tests
 ```
 
-Run the tests with `poetry run pytest`.
