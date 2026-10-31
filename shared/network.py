@@ -7,7 +7,6 @@ from config import P2P_PORT, MAX_PLAYERS, SPAWN_HEIGHT, HEARTBEAT_INTERVAL, HEAR
 
 REJOIN_LOAD_TIMEOUT = 30   # seconds a rejoining player has to finish loading the level
 
-
 class Room:
     """HOST/SERVER ONLY: who is in the room and in what state. A client is identified by its (ip, UDP port)."""
 
@@ -53,36 +52,13 @@ class Room:
         self.last_seen[new_addr] = time.time()
         self.rejoining[pid] = time.time()
 
-
 class OnlineStatus:
     def __init__(self):
         self.status = "idle"        # idle -> connecting -> queued -> matched -> error
         self.error = None
 
-
-class NetworkManager:
-    def __init__(self):
-        self.sock = None                    # UDP socket for the game messages
-        self.join_tcp_sock = None           # host only: TCP socket used for joining
-        self.running = False                # False after stop(): threads end and nothing is sent
-        self.player_id = None               # our id (given by the host/server)
-        self.is_host = False                # True if we are the host (P2P) or the server (Online)
-        self.host_ip = None                 # the host/server we are connected to
-        self.host_port = P2P_PORT           # (if we are the host: our own port)
-        self.join_rejected = None           # None if all is fine, otherwise the reason why we were refused
-        self.last_host_seen = time.time()   # client only: last time we heard from the host
-        self.allow_host_migration = False   # P2P: if the host disappears, another one is elected
-        self.leaving_deliberately = False   # True: stop() sends LEAVE (final) instead of DISCONNECT
-
-        self.room = Room()                  # host/server only
-        self.online = OnlineStatus()        # Online client only
-
-        self.msg_queue = queue.Queue()      # received messages, read by the game with process_queue
-        self.lock = threading.RLock()       # protects room.clients: several threads use it
-        self._tick_thread = None            # thread that sends the positions at fixed intervals
-        self._heartbeat_thread = None       # thread that sends the host heartbeat
-
-    # Connecting
+# CLIENT side: find the local UDP port, join a host/server over TCP and wait for our id.
+class Connecting:
     def prepare_local_socket(self):
         """Create the local UDP socket (if missing) and return its port."""
         if self.sock is None:
@@ -144,6 +120,13 @@ class NetworkManager:
             self.send_message("hello")
             time.sleep(0.25)
 
+    def host_alive(self, timeout=HEARTBEAT_TIMEOUT):
+        """Client only: True if we heard from the host in the last 'timeout' seconds."""
+        return self.is_host or (time.time() - self.last_host_seen) < timeout
+
+
+# HOST/SERVER side: open the sockets and answer the join requests.
+class Hosting:
     def setup_host(self, port=None, player_id=0):
         """Become host/server: one UDP and one TCP socket on the SAME port. After a migration the promoted client passes its own id, to keep its identity."""
         self.is_host = True
@@ -167,7 +150,6 @@ class NetworkManager:
         threading.Thread(target=self._accept_join_loop, daemon=True).start()
         print(f"[Network] Host/server avviato sulla porta {bind_port} (player_id={player_id})")
 
-    #  joining (host only) 
     def _accept_join_loop(self):
         """Accept incoming TCP connections, each one in its own thread."""
         while self.running:
@@ -263,7 +245,9 @@ class NetworkManager:
         if room.on_join:
             room.on_join(new_id, client_addr)
 
-    #  sending 
+
+# Sending messages and the two threads that send at fixed intervals: snapshots and heartbeat.
+class Sending:
     def send_message(self, method_name, *args):
         """Client: to the host/server. Host: to all the clients. Sender: our id."""
         if self.player_id is None and not self.is_host:
@@ -272,7 +256,6 @@ class NetworkManager:
 
     def send_raw(self, msg: str):
         """Send an already serialized message (same rules as send_message)."""
-        # After stop() nothing is sent anymore: a heartbeat after "DISCONNECT" would look like a return.
         if not self.sock or not self.running:
             return
         encoded = msg.encode()
@@ -347,6 +330,9 @@ class NetworkManager:
         self._heartbeat_thread = threading.Thread(target=_loop, daemon=True)
         self._heartbeat_thread.start()
 
+
+# HOST/SERVER side: who is silent, pause for everybody, removal after the grace period.
+class Liveness:
     def _announce_pause(self, is_paused, pid):
         """Pause/resume for everybody. The host does not receive its own broadcasts: if it is also a player (P2P) we put the message in its queue, otherwise it would keep playing."""
         self.broadcast_message("game_pause", is_paused, pid)
@@ -388,10 +374,9 @@ class NetworkManager:
         self.msg_queue.put(leave_payload)
         self.send_raw(json.dumps(leave_payload))
 
-    def host_alive(self, timeout=HEARTBEAT_TIMEOUT):
-        """Client only: True if we heard from the host in the last 'timeout' seconds."""
-        return self.is_host or (time.time() - self.last_host_seen) < timeout
 
+# Receiving messages: the receive thread, the checks on the sender and the queue read by the game.
+class Receiving:
     def receive_loop(self):
         """Thread that waits for UDP packets and hands each one to on_receive_data."""
         while self.running:
@@ -494,6 +479,30 @@ class NetworkManager:
         """Give every received message to the game's handler."""
         while not self.msg_queue.empty():
             message_handler_func(self.msg_queue.get_nowait())
+
+
+# The network of one program: client, P2P host or dedicated server. 
+class NetworkManager(Connecting, Hosting, Sending, Liveness, Receiving):
+    def __init__(self):
+        self.sock = None                    # UDP socket for the game messages
+        self.join_tcp_sock = None           # host only: TCP socket used for joining
+        self.running = False                # False after stop(): threads end and nothing is sent
+        self.player_id = None               
+        self.is_host = False                #
+        self.host_ip = None                 # the host/server we are connected to
+        self.host_port = P2P_PORT           
+        self.join_rejected = None           # None if all is fine, otherwise the reason why we were refused
+        self.last_host_seen = time.time()   # client only: last time we heard from the host
+        self.allow_host_migration = False   # P2P: if the host disappears, another one is elected
+        self.leaving_deliberately = False   # True: stop() sends LEAVE (final) instead of DISCONNECT
+
+        self.room = Room()                  # host/server only
+        self.online = OnlineStatus()        # Online client only
+
+        self.msg_queue = queue.Queue()      # received messages, read by the game with process_queue
+        self.lock = threading.RLock()       # protects room.clients: several threads use it
+        self._tick_thread = None            # thread that sends the positions at fixed intervals
+        self._heartbeat_thread = None       # thread that sends the host heartbeat
 
     def stop(self):
         """Close everything. A client says goodbye to the host: LEAVE if deliberate, otherwise DISCONNECT (he may rejoin)."""
